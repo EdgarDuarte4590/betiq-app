@@ -43,7 +43,7 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
 
     const response = await fetch(
       // Pedimos TODOS los bookmakers disponibles (eu,us,uk) para el motor multi-bookmaker
-      `https://api.the-odds-api.com/v4/sports/${sport}/odds?apiKey=${API_KEY}&regions=eu,us,uk&markets=h2h&oddsFormat=decimal`,
+      `https://api.the-odds-api.com/v4/sports/${sport}/odds?apiKey=${API_KEY}&regions=eu,us,uk&markets=h2h,totals&oddsFormat=decimal`,
       {
         signal: controller.signal,
         // ISR: cachea por 1 hora. Next.js reutiliza esta respuesta automáticamente.

@@ -7,12 +7,16 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   const isAuthPage = pathname === '/login' || pathname === '/register';
 
   return (
-    <main style={{
-      marginLeft: isAuthPage ? 0 : 'var(--sidebar-width)',
-      flex: 1,
-      padding: isAuthPage ? 0 : '2rem',
-      minHeight: '100vh',
-    }}>
+    <main
+      className={isAuthPage ? '' : 'app-main'}
+      style={{
+        marginLeft: isAuthPage ? 0 : 'var(--sidebar-width)',
+        flex: 1,
+        padding: isAuthPage ? 0 : '1.5rem',
+        minHeight: '100vh',
+        transition: 'margin-left 0.2s, padding 0.2s',
+      }}
+    >
       {children}
     </main>
   );

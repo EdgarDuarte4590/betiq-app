@@ -203,3 +203,76 @@ body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
 }
+
+/* ========== RESPONSIVE ========== */
+
+/* Dashboard 2-column grid */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 1.5rem;
+}
+
+@media (max-width: 900px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Value bets rows */
+.value-bet-row {
+  transition: background 0.15s;
+}
+.value-bet-row:hover {
+  background: rgba(255,255,255,0.02);
+}
+
+@media (max-width: 768px) {
+  /* Stack value-bet rows on mobile */
+  .value-bet-row {
+    grid-template-columns: 1fr 1fr !important;
+    gap: 0.75rem !important;
+  }
+  .value-bet-row > div:nth-child(1) {
+    grid-column: 1 / -1;
+  }
+  .value-bet-row > div:nth-child(2) {
+    grid-column: 1 / -1;
+  }
+
+  /* Sidebar: hide on mobile */
+  aside {
+    display: none !important;
+  }
+
+  /* Remove sidebar margin on main content */
+  .app-main {
+    margin-left: 0 !important;
+    padding: 1rem !important;
+  }
+
+  /* Stat cards: 2 columns on mobile */
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+
+  /* Cards: reduce padding */
+  .card {
+    padding: 0.875rem;
+  }
+  .stat-card {
+    padding: 0.875rem;
+  }
+
+  /* Sports table: stack on mobile */
+  .card table,
+  .card [style*="grid-template-columns: 1fr repeat(5"] {
+    font-size: 0.75rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .stats-grid {
+    grid-template-columns: 1fr !important;
+  }
+}

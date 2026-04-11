@@ -2,38 +2,35 @@
 
 import LocalTime from '@/components/LocalTime';
 import { useBankrollStore } from '@/lib/store/bankrollStore';
+import type { SmartPick } from '@/lib/algorithms/value-bet-calculator';
+import { getSportMeta } from '@/lib/apis/odds-api';
 
-interface PickProps {
-  pick: {
-    sport: string;
-    league: string;
-    match: string;
-    pick: string;
-    odds: string;
-    bookmakerName: string;
-    timeISO: string;
-    hasValue: boolean;
-    valuePercentage: number;
-    kellyStake: number;
-    realWinPercentage: number;
-  }
-}
+export default function PickCard({ pick }: { pick: SmartPick }) {
+  const { openModal, bankroll } = useBankrollStore();
 
-export default function PickCard({ pick }: PickProps) {
-  const { openModal } = useBankrollStore();
+  const { icon } = getSportMeta(pick.sport);
+  const realBankroll = bankroll > 0 ? bankroll : 1000;
+  const suggestedStake = pick.kellyStake > 0 
+    ? ((realBankroll * pick.kellyStake) / 100).toFixed(2) 
+    : '50';
 
   const handleCardClick = () => {
-    // Cuando el usuario hace clic en el partido, abrimos el modal de Registrar Apuesta
-    // inyectándole los datos dinámicamente:
     openModal({
-      match: pick.match,
-      odds: pick.odds,
-      stake: pick.kellyStake > 0 ? ((1000 * pick.kellyStake) / 100).toFixed(2) : '50', // Por ahora asume 1000 de bankroll inicial
-      sport: pick.sport,
+      match: pick.event,
+      odds: pick.bestOdds.toFixed(2),
+      stake: suggestedStake,
+      sport: icon,
       league: pick.league,
-      pick: pick.pick
+      pick: pick.bestPick,
     });
   };
+
+  const confidenceColors = {
+    alta:  { bg: 'rgba(0,214,143,0.12)', color: 'var(--accent-green)', label: '🔥 Alta' },
+    media: { bg: 'rgba(255,215,0,0.12)', color: 'var(--accent-gold)', label: '⚡ Media' },
+    baja:  { bg: 'rgba(148,163,184,0.12)', color: '#94a3b8', label: '📊 Baja' },
+  };
+  const conf = confidenceColors[pick.confidence];
 
   return (
     <div 
@@ -44,55 +41,65 @@ export default function PickCard({ pick }: PickProps) {
         borderRadius: 10,
         padding: '1rem',
         border: '1px solid var(--border-subtle)',
-        transition: 'border-color 0.2s',
+        transition: 'border-color 0.2s, transform 0.15s',
         cursor: 'pointer',
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+      {/* Top row: sport + league + time */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+        <span>{icon}</span>
+        <span style={{ fontSize: '0.72rem', color: 'var(--foreground-muted)' }}>{pick.league}</span>
+        <span style={{ fontSize: '0.68rem', color: 'var(--foreground-subtle)' }}>
+          · <LocalTime isoString={pick.commenceTime} format="time" />
+        </span>
+        {pick.valuePercentage > 0 && (
+          <span style={{ marginLeft: 'auto', padding: '1px 8px', borderRadius: 99, background: conf.bg, color: conf.color, fontSize: '0.65rem', fontWeight: 700 }}>
+            {conf.label}
+          </span>
+        )}
+      </div>
+
+      {/* Match name */}
+      <div style={{ fontWeight: 600, fontSize: '0.95rem', marginBottom: 6 }}>{pick.event}</div>
+
+      {/* The pick (analyst recommendation) */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-            <span>{pick.sport}</span>
-            <span style={{ fontSize: '0.7rem', color: 'var(--foreground-muted)' }}>{pick.league}</span>
-            <span style={{ fontSize: '0.7rem', color: 'var(--foreground-subtle)' }}>
-              · <LocalTime isoString={pick.timeISO} format="time" />
-            </span>
+          <div style={{ fontSize: '0.82rem', color: 'var(--accent-green)', fontWeight: 600 }}>
+            → {pick.bestPick}
           </div>
-          <div style={{ fontWeight: 600, fontSize: '0.95rem', marginBottom: 2 }}>{pick.match}</div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--accent-green)' }}>→ {pick.pick}</div>
+          <div style={{ fontSize: '0.68rem', color: 'var(--foreground-subtle)', marginTop: 2 }}>
+            {pick.bestMarket} · {pick.bookmakerCount} casas
+          </div>
         </div>
         <div style={{ textAlign: 'right' }}>
-          <div style={{ fontSize: '1.3rem', fontWeight: 800, color: pick.hasValue ? 'var(--accent-gold)' : 'var(--foreground)' }}>
-            {pick.odds}
+          <div style={{ fontSize: '1.3rem', fontWeight: 800, color: pick.valuePercentage > 0 ? 'var(--accent-gold)' : 'var(--foreground)' }}>
+            {pick.oddsRange}
           </div>
-          <div style={{ fontSize: '0.7rem', color: 'var(--foreground-muted)' }}>{pick.bookmakerName}</div>
-          {pick.hasValue && (
-            <div style={{ marginTop: 4 }}>
-              <span style={{ color: 'var(--accent-gold)', fontSize: '0.7rem' }}>⭐</span>
-              {pick.valuePercentage > 10 && <span style={{ color: 'var(--accent-gold)', fontSize: '0.7rem' }}>⭐</span>}
+          {pick.valuePercentage > 0 && (
+            <div style={{ fontSize: '0.7rem', color: 'var(--accent-green)', fontWeight: 700, marginTop: 2 }}>
+              +{pick.valuePercentage.toFixed(1)}% valor
             </div>
           )}
         </div>
       </div>
 
-      {pick.hasValue && (
-        <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+      {/* Value bar */}
+      {pick.valuePercentage > 0 && (
+        <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
           <div style={{
-            flex: 1, height: 4, borderRadius: 2,
-            background: 'var(--border)',
-            overflow: 'hidden',
+            flex: 1, height: 3, borderRadius: 2,
+            background: 'var(--border)', overflow: 'hidden',
           }}>
             <div style={{
-              width: `${Math.min(pick.valuePercentage * 10, 100)}%`,
+              width: `${Math.min(pick.valuePercentage * 8, 100)}%`,
               height: '100%',
               background: 'linear-gradient(90deg, var(--accent-green), var(--accent-gold))',
               borderRadius: 2,
             }} />
           </div>
-          <span style={{ fontSize: '0.75rem', color: 'var(--accent-green)', fontWeight: 700 }}>
-            +{pick.valuePercentage.toFixed(1)}% Valor
-          </span>
-          <span style={{ fontSize: '0.75rem', color: 'var(--foreground)', marginLeft: 6, fontWeight: 500 }}>
-            Sugerido: {pick.kellyStake.toFixed(1)}% ({pick.realWinPercentage.toFixed(0)}% vR)
+          <span style={{ fontSize: '0.68rem', color: 'var(--foreground-muted)' }}>
+            Kelly: {pick.kellyStake.toFixed(1)}%
           </span>
         </div>
       )}
