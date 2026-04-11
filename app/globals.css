@@ -229,7 +229,7 @@ body {
 
 /* ── Bottom Nav: hidden on desktop, shown on mobile ── */
 .bottom-nav {
-  display: none;
+  display: none !important;
 }
 
 @media (max-width: 768px) {

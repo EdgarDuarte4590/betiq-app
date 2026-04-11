@@ -181,9 +181,14 @@ export default function BankrollPageClient({
 
       {/* ── Bankroll Evolution Chart ── */}
       <div className="card">
-        <div style={{ fontWeight: 700, fontSize: '0.9rem', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: 8 }}>
-          <TrendingUp size={16} color="var(--accent-green)" />
-          Evolución del Bankroll
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
+          <div style={{ fontWeight: 700, fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <TrendingUp size={16} color="var(--accent-green)" />
+            Evolución del Bankroll
+          </div>
+          <div style={{ fontSize: '0.7rem', color: 'var(--foreground-muted)' }}>
+            Basado en {closedBets.length} apuestas cerradas
+          </div>
         </div>
 
         {chartPoints.length < 2 ? (
@@ -196,7 +201,7 @@ export default function BankrollPageClient({
         ) : (
           <div style={{ overflowX: 'auto' }}>
             <svg
-              viewBox={`0 0 ${Math.max(chartPoints.length * 40, 300)} 180`}
+              viewBox={`0 0 ${Math.max(chartPoints.length * 40 + 40, 300)} 180`}
               style={{ width: '100%', minWidth: 300, height: 180, display: 'block' }}
             >
               {/* Grid lines */}
