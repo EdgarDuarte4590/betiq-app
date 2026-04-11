@@ -227,6 +227,11 @@ body {
   background: rgba(255,255,255,0.02);
 }
 
+/* ── Bottom Nav: hidden on desktop, shown on mobile ── */
+.bottom-nav {
+  display: none;
+}
+
 @media (max-width: 768px) {
   /* Stack value-bet rows on mobile */
   .value-bet-row {
@@ -245,10 +250,15 @@ body {
     display: none !important;
   }
 
-  /* Remove sidebar margin on main content */
+  /* Bottom nav: show on mobile */
+  .bottom-nav {
+    display: flex !important;
+  }
+
+  /* Remove sidebar margin + add padding for bottom nav */
   .app-main {
     margin-left: 0 !important;
-    padding: 1rem !important;
+    padding: 1rem 1rem 5.5rem !important; /* extra bottom for the nav bar */
   }
 
   /* Stat cards: 2 columns on mobile */
@@ -264,10 +274,15 @@ body {
     padding: 0.875rem;
   }
 
-  /* Sports table: stack on mobile */
+  /* Sports table: reduce font on mobile */
   .card table,
   .card [style*="grid-template-columns: 1fr repeat(5"] {
     font-size: 0.75rem;
+  }
+
+  /* Dashboard grid: 1 column on mobile */
+  .dashboard-grid {
+    grid-template-columns: 1fr !important;
   }
 }
 
@@ -276,3 +291,4 @@ body {
     grid-template-columns: 1fr !important;
   }
 }
+

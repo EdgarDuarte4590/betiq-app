@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import Sidebar from "@/components/Sidebar";
 import ClientLayout from "@/components/ClientLayout";
+import BottomNav from "@/components/BottomNav";
 
 export const metadata: Metadata = {
   title: "BetIQ — Análisis de Apuestas Deportivas",
@@ -16,6 +17,7 @@ export default function RootLayout({
   return (
     <html lang="es" data-scroll-behavior="smooth">
       <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
       </head>
@@ -24,6 +26,7 @@ export default function RootLayout({
           <Sidebar />
           <ClientLayout>{children}</ClientLayout>
         </div>
+        <BottomNav />
       </body>
     </html>
   );
