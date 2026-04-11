@@ -19,7 +19,8 @@ interface Bet {
 }
 
 function formatDate(dateStr: string) {
-  return new Date(dateStr).toLocaleDateString('es', {
+  return new Date(dateStr).toLocaleDateString('es-CR', {
+    timeZone: 'America/Costa_Rica',
     day: 'numeric', month: 'short',
     hour: '2-digit', minute: '2-digit',
   });
