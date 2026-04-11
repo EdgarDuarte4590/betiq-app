@@ -4,7 +4,7 @@ import { useState, useEffect, useTransition } from 'react';
 import { useBankrollStore } from '@/lib/store/bankrollStore';
 import { createClient } from '@/lib/supabase/client';
 import { CheckCircle2, X, Loader2, DollarSign, TrendingUp } from 'lucide-react';
-
+import { createPortal } from 'react-dom';
 export default function BankrollWidget() {
   const { bankroll, isModalOpen, openModal, closeModal, draftBet, user, syncWithSupabase, updateBankrollInDB } = useBankrollStore();
   const supabase = createClient();
@@ -15,9 +15,11 @@ export default function BankrollWidget() {
   const [market, setMarket] = useState('H2H');
   const [isPending, startTransition] = useTransition();
   const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+  const [mounted, setMounted] = useState(false);
 
   // Pre-rellenar formulario con el draft del partido seleccionado
   useEffect(() => {
+    setMounted(true);
     if (draftBet) {
       setMatch(draftBet.match);
       setOdds(draftBet.odds);
@@ -99,7 +101,7 @@ export default function BankrollWidget() {
   return (
     <>
       {/* ── Toast Notification ── */}
-      {toast && (
+      {mounted && toast && createPortal(
         <div style={{
           position: 'fixed', top: '1.5rem', right: '1.5rem', zIndex: 9999,
           padding: '0.875rem 1.25rem',
@@ -114,7 +116,8 @@ export default function BankrollWidget() {
           boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
         }}>
           {toast.msg}
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* ── Bankroll Card ── */}
@@ -141,13 +144,13 @@ export default function BankrollWidget() {
       </div>
 
       {/* ── Modal ── */}
-      {isModalOpen && (
+      {mounted && isModalOpen && createPortal(
         <div style={{
           position: 'fixed', inset: 0,
           background: 'rgba(0,0,0,0.75)',
           backdropFilter: 'blur(6px)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 1000, padding: '1rem',
+          zIndex: 9999, padding: '1rem',
           animation: 'fadeIn 0.2s ease',
         }}>
           <div className="card" style={{
@@ -155,6 +158,8 @@ export default function BankrollWidget() {
             background: 'var(--background-card)',
             border: '1px solid var(--border)',
             boxShadow: '0 24px 60px rgba(0,0,0,0.5)',
+            maxHeight: '95vh',
+            overflowY: 'auto'
           }}>
             {/* Header */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
@@ -277,7 +282,8 @@ export default function BankrollWidget() {
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );
