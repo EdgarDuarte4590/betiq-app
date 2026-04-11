@@ -42,14 +42,36 @@ export default async function DashboardPage() {
   const allEvents = await getUpcomingMatches('upcoming');
   const { upcoming, possiblyLive } = categorizeEventsByTime(allEvents);
 
-  // Smart picks: la mejor recomendación por partido (el analista elige)
-  const smartPicks = getSmartPicks(upcoming, true);
-  const displayUpcoming = smartPicks.slice(0, 5);
-  const displayLater = smartPicks.slice(5, 10);
+  const allValidMatches = [...upcoming, ...possiblyLive];
+  // Calculate best picks for ALL valid matches
+  let smartPicks = getSmartPicks(allValidMatches, true);
 
-  // Value bets: top 3 para sidebar
+  // Sort them by time so they make chronological chronological sense
+  smartPicks.sort((a, b) => new Date(a.commenceTime).getTime() - new Date(b.commenceTime).getTime());
+
+  const nowMs = Date.now();
+  const enJuegoPicks = smartPicks.filter(p => {
+    // If it's in the possiblyLive list (started < 3h ago)
+    return possiblyLive.some(e => e.id === p.eventId);
+  });
+
+  const timeFiltered = smartPicks.filter(p => !enJuegoPicks.includes(p));
+  
+  // Próximos: next 24 hours
+  const proximosPicks = timeFiltered.filter(p => {
+    const diff = new Date(p.commenceTime).getTime() - nowMs;
+    return diff <= 24 * 60 * 60 * 1000;
+  });
+
+  // Mañana: beyond 24 hours
+  const mananaPicks = timeFiltered.filter(p => {
+    const diff = new Date(p.commenceTime).getTime() - nowMs;
+    return diff > 24 * 60 * 60 * 1000;
+  });
+
+  // Value bets: top 3 para sidebar (we just use upcoming here to not confuse sidebar)
   const topValueBets = extractValueBets(upcoming, 2.0, true).slice(0, 3);
-
+  
   // ── Stat Cards ─────
   const statsData = [
     {
@@ -121,37 +143,54 @@ export default async function DashboardPage() {
       <div className="dashboard-grid">
         {/* Left: Smart Picks */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+          
+          {enJuegoPicks.length > 0 && (
+            <div className="card" style={{ border: '1px solid rgba(239,68,68,0.3)', background: 'linear-gradient(180deg, rgba(239,68,68,0.05) 0%, var(--background-card) 20px)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: 8 }}>
+                <h2 style={{ fontWeight: 700, fontSize: '1rem', display: 'flex', alignItems: 'center', gap: 6, color: 'var(--accent-red)' }}>
+                  <span style={{ animation: 'pulse 2s infinite' }}>🔴</span>
+                  Partidos en Juego
+                </h2>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+                {enJuegoPicks.map((pick, i) => (
+                  <PickCard key={`live-${i}`} pick={pick} isLive={true} />
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: 8 }}>
               <h2 style={{ fontWeight: 700, fontSize: '1rem', display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Activity size={16} color="var(--accent-green)" />
-                Recomendaciones
+                Próximas 24 Horas
               </h2>
               <span style={{ fontSize: '0.7rem', color: 'var(--foreground-muted)' }}>
                 ⚽🏀⚾ Clic para apostar
               </span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-              {displayUpcoming.length === 0 ? (
+              {proximosPicks.length === 0 ? (
                 <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--foreground-muted)', fontSize: '0.85rem' }}>
-                  Sin partidos de fútbol, basket o béisbol próximos. Se actualiza cada hora.
+                  Sin partidos próximos en las siguientes 24 horas.
                 </div>
-              ) : displayUpcoming.map((pick, i) => (
+              ) : proximosPicks.map((pick, i) => (
                 <PickCard key={`up-${i}`} pick={pick} />
               ))}
             </div>
           </div>
 
-          {displayLater.length > 0 && (
+          {mananaPicks.length > 0 && (
             <div className="card">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                 <h2 style={{ fontWeight: 700, fontSize: '1rem', display: 'flex', alignItems: 'center', gap: 6 }}>
                   <Clock size={16} color="var(--foreground-muted)" />
-                  Para Más Tarde
+                  Para Mañana o Más Tarde
                 </h2>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-                {displayLater.map((pick, i) => (
+                {mananaPicks.map((pick, i) => (
                   <PickCard key={`later-${i}`} pick={pick} />
                 ))}
               </div>

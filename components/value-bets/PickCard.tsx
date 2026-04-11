@@ -5,7 +5,7 @@ import { useBankrollStore } from '@/lib/store/bankrollStore';
 import type { SmartPick } from '@/lib/algorithms/value-bet-calculator';
 import { getSportMeta } from '@/lib/apis/odds-api';
 
-export default function PickCard({ pick }: { pick: SmartPick }) {
+export default function PickCard({ pick, isLive = false }: { pick: SmartPick; isLive?: boolean }) {
   const { openModal, bankroll } = useBankrollStore();
 
   const { icon } = getSportMeta(pick.sport);
@@ -52,9 +52,14 @@ export default function PickCard({ pick }: { pick: SmartPick }) {
         <span style={{ fontSize: '0.68rem', color: 'var(--foreground-subtle)' }}>
           · <LocalTime isoString={pick.commenceTime} format="time" />
         </span>
-        {pick.valuePercentage > 0 && (
+        {pick.valuePercentage > 0 && !isLive && (
           <span style={{ marginLeft: 'auto', padding: '1px 8px', borderRadius: 99, background: conf.bg, color: conf.color, fontSize: '0.65rem', fontWeight: 700 }}>
             {conf.label}
+          </span>
+        )}
+        {isLive && (
+          <span style={{ marginLeft: 'auto', padding: '1px 8px', borderRadius: 99, background: 'rgba(239,68,68,0.15)', color: 'var(--accent-red)', fontSize: '0.65rem', fontWeight: 800, animation: 'pulse 2s infinite' }}>
+            🔴 EN JUEGO
           </span>
         )}
       </div>

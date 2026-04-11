@@ -46,8 +46,9 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
       `https://api.the-odds-api.com/v4/sports/${sport}/odds?apiKey=${API_KEY}&regions=eu,us,uk&markets=h2h,totals&oddsFormat=decimal`,
       {
         signal: controller.signal,
-        // ISR: cachea por 1 hora. Next.js reutiliza esta respuesta automáticamente.
-        next: { revalidate: 3600 },
+        // ISR: cachea por 8 horas (28800 segundos) para hacer solo 3 peticiones al día
+        // y generar el efecto "Screenshot", manteniendo los partidos visibles aunque empiecen.
+        next: { revalidate: 28800 },
       }
     );
     clearTimeout(timeoutId);
