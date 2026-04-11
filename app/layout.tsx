@@ -3,6 +3,7 @@ import "./globals.css";
 import Sidebar from "@/components/Sidebar";
 import ClientLayout from "@/components/ClientLayout";
 import BottomNav from "@/components/BottomNav";
+import GlobalBetModal from "@/components/GlobalBetModal";
 
 export const metadata: Metadata = {
   title: "BetIQ — Análisis de Apuestas Deportivas",
@@ -27,6 +28,7 @@ export default function RootLayout({
           <ClientLayout>{children}</ClientLayout>
         </div>
         <BottomNav />
+        <GlobalBetModal />
       </body>
     </html>
   );

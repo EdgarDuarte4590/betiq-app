@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
 import { Ticket, TrendingUp, DollarSign, Target } from 'lucide-react';
 import BetCard from '@/components/picks/BetCard';
+import SyncButton from '@/components/picks/SyncButton';
 import { calculateBettingStats } from '@/lib/algorithms/value-bet-calculator';
 
 export default async function PicksPage() {
@@ -31,13 +32,18 @@ export default async function PicksPage() {
   return (
     <div>
       <header style={{ marginBottom: '1.5rem' }}>
-        <h1 style={{ fontSize: '1.5rem', fontWeight: '800', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <Ticket size={22} color="var(--accent-gold)" />
-          Mis Picks
-        </h1>
-        <p style={{ color: 'var(--foreground-muted)', marginTop: '0.4rem', fontSize: '0.85rem' }}>
-          Historial completo de tus apuestas. Cierra tus tiquetes marcándolos como Ganados o Perdidos.
-        </p>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '1rem' }}>
+          <div>
+            <h1 style={{ fontSize: '1.5rem', fontWeight: '800', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <Ticket size={22} color="var(--accent-gold)" />
+              Mis Picks
+            </h1>
+            <p style={{ color: 'var(--foreground-muted)', marginTop: '0.4rem', fontSize: '0.85rem' }}>
+              Historial completo · Cierra tus tiquetes o sincroniza con resultados reales.
+            </p>
+          </div>
+          {pendingBets.length > 0 && <SyncButton />}
+        </div>
       </header>
 
       {/* Stats Row */}
