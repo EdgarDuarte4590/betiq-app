@@ -10,7 +10,7 @@ export default async function BankrollPage() {
 
   const [profileResult, betsResult] = await Promise.all([
     supabase.from('profiles').select('bankroll_actual, bankroll_inicial').eq('id', user.id).single(),
-    supabase.from('bets').select('status, stake, odds, profit').eq('user_id', user.id),
+    supabase.from('bets').select('status, stake, odds, profit, created_at').eq('user_id', user.id).order('created_at', { ascending: true }),
   ]);
 
   const profile = profileResult.data;
@@ -31,6 +31,12 @@ export default async function BankrollPage() {
       winRate={stats.winRate}
       totalProfit={stats.totalProfit}
       totalBets={stats.total}
+      bets={allBets.map(b => ({
+        status: b.status,
+        stake: parseFloat(b.stake ?? '0'),
+        profit: parseFloat(b.profit ?? '0'),
+        created_at: b.created_at,
+      }))}
     />
   );
 }

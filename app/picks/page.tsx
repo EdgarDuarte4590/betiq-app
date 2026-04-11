@@ -29,13 +29,13 @@ export default async function PicksPage() {
   const lostBets = allBets.filter(b => b.status === 'lost');
 
   return (
-    <div style={{ padding: '2rem', maxWidth: '1200px', margin: '0 auto' }}>
-      <header style={{ marginBottom: '2rem' }}>
-        <h1 style={{ fontSize: '2rem', fontWeight: '800', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <Ticket size={28} color="var(--accent-gold)" />
+    <div>
+      <header style={{ marginBottom: '1.5rem' }}>
+        <h1 style={{ fontSize: '1.5rem', fontWeight: '800', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <Ticket size={22} color="var(--accent-gold)" />
           Mis Picks
         </h1>
-        <p style={{ color: 'var(--foreground-muted)', marginTop: '0.5rem' }}>
+        <p style={{ color: 'var(--foreground-muted)', marginTop: '0.4rem', fontSize: '0.85rem' }}>
           Historial completo de tus apuestas. Cierra tus tiquetes marcándolos como Ganados o Perdidos.
         </p>
       </header>
@@ -77,7 +77,7 @@ export default async function PicksPage() {
           </p>
         </div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '1.5rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 300px), 1fr))', gap: '1rem' }}>
 
           {/* Pendientes */}
           <div>
