@@ -37,39 +37,36 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
     return [];
   }
 
+  // Si nos piden 'upcoming', en lugar de usar el endpoint global que solo devuelve 8 partidos,
+  // hacemos consultas a ligas principales garantizando volumen y calidad.
+  // 4 ligas * 3 peticiones al día (cada 8h) = 12 peticiones/día = 360/mes. (Plan gratis: 500/mes).
+  let targetSports = [sport];
+  if (sport === 'upcoming') {
+    targetSports = ['soccer_epl', 'soccer_spain_la_liga', 'basketball_nba', 'baseball_mlb'];
+  }
+
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
-
-    const response = await fetch(
-      // Pedimos TODOS los bookmakers disponibles (eu,us,uk) para el motor multi-bookmaker
-      `https://api.the-odds-api.com/v4/sports/${sport}/odds?apiKey=${API_KEY}&regions=eu,us,uk&markets=h2h,totals&oddsFormat=decimal`,
-      {
+    const fetchPromises = targetSports.map(async (s) => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const url = `https://api.the-odds-api.com/v4/sports/${s}/odds?apiKey=${API_KEY}&regions=eu,us,uk&markets=h2h,totals&oddsFormat=decimal`;
+      
+      const response = await fetch(url, {
         signal: controller.signal,
-        // ISR: cachea por 8 horas (28800 segundos) para hacer solo 3 peticiones al día
-        // y generar el efecto "Screenshot", manteniendo los partidos visibles aunque empiecen.
-        next: { revalidate: 28800 },
-      }
-    );
-    clearTimeout(timeoutId);
+        next: { revalidate: 28800 }, // 8 horas
+      });
+      clearTimeout(timeoutId);
 
-    if (!response.ok) {
-      const remaining = response.headers.get('x-requests-remaining');
-      console.error(`[OddsAPI] Error ${response.status}. Requests restantes: ${remaining}`);
-      return [];
-    }
+      if (!response.ok) return [];
+      return await response.json();
+    });
 
-    const data: OddEvent[] = await response.json();
-    const remaining = response.headers.get('x-requests-remaining');
-    console.info(`[OddsAPI] OK. Requests restantes del plan: ${remaining}`);
-
-    return data;
+    const results = await Promise.all(fetchPromises);
+    // Flatten array of arrays
+    const allEvents: OddEvent[] = results.flat();
+    return allEvents;
   } catch (error: any) {
-    if (error?.name === 'AbortError') {
-      console.error('[OddsAPI] Timeout después de 15s — conexión lenta o sin internet.');
-    } else {
-      console.error('[OddsAPI] Error de red:', error);
-    }
+    console.error('[OddsAPI] Error de red principal:', error);
     return [];
   }
 }
