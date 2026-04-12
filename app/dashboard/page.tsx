@@ -70,7 +70,7 @@ export default async function DashboardPage() {
   });
 
   // Value bets: top 3 para sidebar (we just use upcoming here to not confuse sidebar)
-  const topValueBets = extractValueBets(upcoming, 2.0, true).slice(0, 3);
+  const topValueBets = extractValueBets(upcoming, 1.5, true).slice(0, 3);
   
   // ── Stat Cards ─────
   const statsData = [

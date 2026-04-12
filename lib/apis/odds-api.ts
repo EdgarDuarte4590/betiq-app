@@ -53,7 +53,7 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
       
       const response = await fetch(url, {
         signal: controller.signal,
-        next: { revalidate: 28800 }, // 8 horas
+        next: { revalidate: 21600 }, // 6 horas (4 sports * 4/día = 16/día = 480/mes)
       });
       clearTimeout(timeoutId);
 
