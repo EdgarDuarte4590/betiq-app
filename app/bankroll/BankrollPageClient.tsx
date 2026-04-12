@@ -37,8 +37,11 @@ export default function BankrollPageClient({
 
   const handleSave = () => {
     startTransition(async () => {
-      const updatedInicial = parseFloat(newInicial) || inicialState;
-      const updatedActual = parseFloat(newBankroll) || actualState;
+      const parsedInicial = parseFloat(newInicial);
+      const updatedInicial = isNaN(parsedInicial) ? inicialState : parsedInicial;
+
+      const parsedActual = parseFloat(newBankroll);
+      const updatedActual = isNaN(parsedActual) ? actualState : parsedActual;
 
       const res = await updateBankrollSettings(updatedInicial, updatedActual);
       if (res.success) {
