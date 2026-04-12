@@ -74,13 +74,36 @@ export async function updateBankrollSettings(
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return { error: 'No autenticado' };
 
-  const { error } = await supabase
+  // Check if the profile row exists first
+  const { data: existing } = await supabase
     .from('profiles')
-    .upsert({
-      id: user.id,
-      bankroll_inicial: bankrollInicial,
-      bankroll_actual: bankrollActual,
-    }, { onConflict: 'id' });
+    .select('id')
+    .eq('id', user.id)
+    .maybeSingle();
+
+  let error;
+
+  if (!existing) {
+    // Profile was deleted manually — recreate it (INSERT is allowed on first create by RLS)
+    const { error: insertError } = await supabase
+      .from('profiles')
+      .insert({
+        id: user.id,
+        bankroll_inicial: bankrollInicial,
+        bankroll_actual: bankrollActual,
+      });
+    error = insertError;
+  } else {
+    // Normal case — just UPDATE
+    const { error: updateError } = await supabase
+      .from('profiles')
+      .update({
+        bankroll_inicial: bankrollInicial,
+        bankroll_actual: bankrollActual,
+      })
+      .eq('id', user.id);
+    error = updateError;
+  }
 
   if (error) return { error: error.message };
 
