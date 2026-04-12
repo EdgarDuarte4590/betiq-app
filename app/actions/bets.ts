@@ -84,11 +84,12 @@ export async function updateBankrollSettings(
   let error;
 
   if (!existing) {
-    // Profile was deleted manually — recreate it (INSERT is allowed on first create by RLS)
+    // Profile was deleted manually — recreate it with all required fields
     const { error: insertError } = await supabase
       .from('profiles')
       .insert({
         id: user.id,
+        email: user.email,
         bankroll_inicial: bankrollInicial,
         bankroll_actual: bankrollActual,
       });
