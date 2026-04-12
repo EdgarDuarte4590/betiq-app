@@ -98,6 +98,7 @@ export default function GlobalBetModal() {
         stake: stakeNum,
         status: 'pending',
         profit: 0,
+        match_time: draftBet?.matchTime || null,
       });
 
       if (betError) {

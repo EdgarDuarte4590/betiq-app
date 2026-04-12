@@ -57,12 +57,23 @@ function normalize(name: string): string {
  */
 function matchBetToScore(
   betEvent: string,
+  betTime: string | null,
   scores: ScoreEvent[]
 ): ScoreEvent | null {
   const normBet = normalize(betEvent);
   
   for (const score of scores) {
     if (!score.completed || !score.scores) continue;
+    
+    // Enforce Date check: Solo hace match si la fecha del partido coincide con la que se guardó
+    if (betTime) {
+      const betDate = new Date(betTime).toISOString().split('T')[0];
+      const scoreDate = new Date(score.commence_time).toISOString().split('T')[0];
+      // Si el partido está guardado para hoy, ignora partidos de The Odds API que hayan sido ayer o mañana
+      if (betDate !== scoreDate) {
+        continue;
+      }
+    }
     
     const normHome = normalize(score.home_team);
     const normAway = normalize(score.away_team);
@@ -99,13 +110,26 @@ function didPickWin(
   const awScore = parseInt(score.scores[1].score);
   
   if (isNaN(homeScore) || isNaN(awScore)) return null;
+  const totalScore = homeScore + awScore;
   
   const normPick = normalize(pick);
   const normHome = normalize(score.home_team);
   const normAway = normalize(score.away_team);
 
+  // Parse Over/Under (Totals) -> e.g. "Over 9.5", "Under 2.5", "Goles +1.5"
+  const isOver = /(over|mas|>|\+)/i.test(pick);
+  const isUnder = /(under|menos|<|-)/i.test(pick);
+  if (isOver || isUnder) {
+    const numMatch = pick.match(/[0-9.]+/);
+    if (numMatch) {
+      const line = parseFloat(numMatch[0]);
+      if (isOver) return totalScore > line;
+      if (isUnder) return totalScore < line;
+    }
+  }
+
   // Handle H2H / Ganador bets
-  if (market === 'H2H' || market === 'Ganador' || !market) {
+  if (market === 'H2H' || market === 'Ganador' || !market || normPick.includes('gana')) {
     if (normPick.includes(normHome) || normHome.includes(normPick)) {
       return homeScore > awScore;
     }
@@ -215,7 +239,8 @@ export async function syncScores(): Promise<{
   let currentBankroll = parseFloat(profile?.bankroll_actual ?? '1000');
 
   for (const bet of pendingBets) {
-    const matchedScore = matchBetToScore(bet.event, allScores);
+    // bet.match_time might be missing in old accounts, so we pass it safely
+    const matchedScore = matchBetToScore(bet.event, bet.match_time ?? null, allScores);
     
     if (!matchedScore) {
       skipped++;

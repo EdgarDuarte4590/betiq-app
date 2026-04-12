@@ -8,6 +8,7 @@ interface BetDraft {
   sport: string;
   league: string;
   pick: string;
+  matchTime?: string;
 }
 
 interface BankrollState {
@@ -42,7 +43,8 @@ export const useBankrollStore = create<BankrollState>((set, get) => ({
       stake: draft.stake || '50',
       sport: draft.sport || '',
       league: draft.league || '',
-      pick: draft.pick || ''
+      pick: draft.pick || '',
+      matchTime: draft.matchTime || ''
     } : null 
   }),
   

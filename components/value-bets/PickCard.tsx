@@ -22,6 +22,7 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
       sport: icon,
       league: pick.league,
       pick: pick.bestPick,
+      matchTime: pick.commenceTime,
     });
   };
 
@@ -50,7 +51,7 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
         <span>{icon}</span>
         <span style={{ fontSize: '0.72rem', color: 'var(--foreground-muted)' }}>{pick.league}</span>
         <span style={{ fontSize: '0.68rem', color: 'var(--foreground-subtle)' }}>
-          · <LocalTime isoString={pick.commenceTime} format="time" />
+          · <LocalTime isoString={pick.commenceTime} format="datetime" />
         </span>
         {pick.valuePercentage > 0 && !isLive && (
           <span style={{ marginLeft: 'auto', padding: '1px 8px', borderRadius: 99, background: conf.bg, color: conf.color, fontSize: '0.65rem', fontWeight: 700 }}>
