@@ -141,8 +141,63 @@ export default async function DashboardPage() {
 
       {/* Main Grid */}
       <div className="dashboard-grid">
+        {/* Right Panel (Bankroll, Top Value Bets) - Rendered first for Mobile, but forced to right column on PC */}
+        <div className="dashboard-right" style={{ display: 'flex', flexDirection: 'column', gap: '0.875rem' }}>
+          <BankrollWidget />
+
+          {/* Top Value Bets */}
+          <div className="card">
+            <div style={{ fontWeight: 700, fontSize: '0.85rem', marginBottom: '0.875rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Zap size={15} color="var(--accent-gold)" />
+              Top Value Bets
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+              {topValueBets.length === 0 ? (
+                <p style={{ fontSize: '0.78rem', color: 'var(--foreground-muted)', textAlign: 'center', padding: '0.75rem' }}>
+                  Sin oportunidades de valor en este momento.
+                </p>
+              ) : topValueBets.map((vb, i) => (
+                <div key={i} style={{ padding: '0.65rem 0.75rem', borderRadius: 8, background: 'rgba(0,214,143,0.06)', border: '1px solid rgba(0,214,143,0.12)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-green)' }}>
+                      ⚡ +{vb.valuePercentage.toFixed(1)}%
+                    </span>
+                    <span style={{ fontSize: '0.68rem', color: 'var(--foreground-muted)' }}>{vb.market}</span>
+                  </div>
+                  <div style={{ fontSize: '0.8rem', fontWeight: 600 }}>{vb.event}</div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--foreground-muted)', marginTop: 2 }}>
+                    {vb.pick} · {vb.oddsMin.toFixed(2)}–{vb.oddsMax.toFixed(2)} · Kelly {vb.kellyStake.toFixed(1)}%
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Esta Semana */}
+          <div className="card">
+            <div style={{ fontWeight: 700, fontSize: '0.85rem', marginBottom: '0.75rem' }}>📈 Esta Semana</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {[
+                { label: 'Apuestas', value: String(weekStats.total) },
+                { label: 'Ganadas', value: String(weekStats.won), color: weekStats.won > 0 ? 'var(--accent-green)' : undefined },
+                { label: 'Perdidas', value: String(weekStats.lost), color: weekStats.lost > 0 ? 'var(--accent-red)' : undefined },
+                {
+                  label: 'Profit',
+                  value: weekStats.totalProfit >= 0 ? `+$${weekStats.totalProfit.toFixed(2)}` : `-$${Math.abs(weekStats.totalProfit).toFixed(2)}`,
+                  color: weekStats.totalProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'
+                },
+              ].map(({ label, value, color }, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem' }}>
+                  <span style={{ color: 'var(--foreground-muted)' }}>{label}</span>
+                  <span style={{ fontWeight: 700, color: color ?? 'var(--foreground)' }}>{value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
         {/* Left: Smart Picks */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+        <div className="dashboard-left" style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
           
           {enJuegoPicks.length > 0 && (
             <div className="card" style={{ border: '1px solid rgba(239,68,68,0.3)', background: 'linear-gradient(180deg, rgba(239,68,68,0.05) 0%, var(--background-card) 20px)' }}>
@@ -196,61 +251,6 @@ export default async function DashboardPage() {
               </div>
             </div>
           )}
-        </div>
-
-        {/* Right Panel */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.875rem' }}>
-          <BankrollWidget />
-
-          {/* Top Value Bets */}
-          <div className="card">
-            <div style={{ fontWeight: 700, fontSize: '0.85rem', marginBottom: '0.875rem', display: 'flex', alignItems: 'center', gap: 6 }}>
-              <Zap size={15} color="var(--accent-gold)" />
-              Top Value Bets
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-              {topValueBets.length === 0 ? (
-                <p style={{ fontSize: '0.78rem', color: 'var(--foreground-muted)', textAlign: 'center', padding: '0.75rem' }}>
-                  Sin oportunidades de valor en este momento.
-                </p>
-              ) : topValueBets.map((vb, i) => (
-                <div key={i} style={{ padding: '0.65rem 0.75rem', borderRadius: 8, background: 'rgba(0,214,143,0.06)', border: '1px solid rgba(0,214,143,0.12)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
-                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-green)' }}>
-                      ⚡ +{vb.valuePercentage.toFixed(1)}%
-                    </span>
-                    <span style={{ fontSize: '0.68rem', color: 'var(--foreground-muted)' }}>{vb.market}</span>
-                  </div>
-                  <div style={{ fontSize: '0.8rem', fontWeight: 600 }}>{vb.event}</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--foreground-muted)', marginTop: 2 }}>
-                    {vb.pick} · {vb.oddsMin.toFixed(2)}–{vb.oddsMax.toFixed(2)} · Kelly {vb.kellyStake.toFixed(1)}%
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Esta Semana */}
-          <div className="card">
-            <div style={{ fontWeight: 700, fontSize: '0.85rem', marginBottom: '0.75rem' }}>📈 Esta Semana</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {[
-                { label: 'Apuestas', value: String(weekStats.total) },
-                { label: 'Ganadas', value: String(weekStats.won), color: weekStats.won > 0 ? 'var(--accent-green)' : undefined },
-                { label: 'Perdidas', value: String(weekStats.lost), color: weekStats.lost > 0 ? 'var(--accent-red)' : undefined },
-                {
-                  label: 'Profit',
-                  value: weekStats.totalProfit >= 0 ? `+$${weekStats.totalProfit.toFixed(2)}` : `-$${Math.abs(weekStats.totalProfit).toFixed(2)}`,
-                  color: weekStats.totalProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'
-                },
-              ].map(({ label, value, color }, i) => (
-                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem' }}>
-                  <span style={{ color: 'var(--foreground-muted)' }}>{label}</span>
-                  <span style={{ fontWeight: 700, color: color ?? 'var(--foreground)' }}>{value}</span>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
       </div>
     </div>

@@ -4,6 +4,7 @@ import { useState, useTransition } from 'react';
 import { DollarSign, Edit3, Check, X, TrendingUp, TrendingDown } from 'lucide-react';
 import { updateBankrollSettings } from '@/app/actions/bets';
 import BankrollWidget from '@/components/bankroll/BankrollWidget';
+import { useBankrollStore } from '@/lib/store/bankrollStore';
 
 interface Props {
   bankrollActual: number;
@@ -30,13 +31,16 @@ export default function BankrollPageClient({
   const [feedback, setFeedback] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
+  const { setBankroll } = useBankrollStore();
+
   const handleSave = () => {
     startTransition(async () => {
-      const res = await updateBankrollSettings(
-        parseFloat(newInicial) || bankrollInicial,
-        parseFloat(newBankroll) || bankrollActual
-      );
+      const updatedInicial = parseFloat(newInicial) || bankrollInicial;
+      const updatedActual = parseFloat(newBankroll) || bankrollActual;
+
+      const res = await updateBankrollSettings(updatedInicial, updatedActual);
       if (res.success) {
+        setBankroll(updatedActual);
         setFeedback('✅ Bankroll actualizado correctamente.');
         setEditing(false);
       } else {

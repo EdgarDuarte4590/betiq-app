@@ -213,9 +213,19 @@ body {
   gap: 1.5rem;
 }
 
+@media (min-width: 901px) {
+  .dashboard-left {
+    grid-column: 1;
+  }
+  .dashboard-right {
+    grid-column: 2;
+  }
+}
+
 @media (max-width: 900px) {
   .dashboard-grid {
-    grid-template-columns: 1fr;
+    display: flex;
+    flex-direction: column;
   }
 }
 
