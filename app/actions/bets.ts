@@ -76,11 +76,11 @@ export async function updateBankrollSettings(
 
   const { error } = await supabase
     .from('profiles')
-    .update({
+    .upsert({
+      id: user.id,
       bankroll_inicial: bankrollInicial,
       bankroll_actual: bankrollActual,
-    })
-    .eq('id', user.id);
+    }, { onConflict: 'id' });
 
   if (error) return { error: error.message };
 

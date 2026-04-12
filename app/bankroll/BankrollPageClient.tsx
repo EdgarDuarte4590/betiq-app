@@ -25,6 +25,8 @@ export default function BankrollPageClient({
   totalBets,
   bets,
 }: Props) {
+  const [actualState, setActualState] = useState(bankrollActual);
+  const [inicialState, setInicialState] = useState(bankrollInicial);
   const [editing, setEditing] = useState(false);
   const [newBankroll, setNewBankroll] = useState(String(bankrollActual));
   const [newInicial, setNewInicial] = useState(String(bankrollInicial));
@@ -35,12 +37,14 @@ export default function BankrollPageClient({
 
   const handleSave = () => {
     startTransition(async () => {
-      const updatedInicial = parseFloat(newInicial) || bankrollInicial;
-      const updatedActual = parseFloat(newBankroll) || bankrollActual;
+      const updatedInicial = parseFloat(newInicial) || inicialState;
+      const updatedActual = parseFloat(newBankroll) || actualState;
 
       const res = await updateBankrollSettings(updatedInicial, updatedActual);
       if (res.success) {
         setBankroll(updatedActual);
+        setActualState(updatedActual);
+        setInicialState(updatedInicial);
         setFeedback('✅ Bankroll actualizado correctamente.');
         setEditing(false);
       } else {
@@ -147,11 +151,11 @@ export default function BankrollPageClient({
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
                   <span style={{ color: 'var(--foreground-muted)' }}>Capital inicial</span>
-                  <span style={{ fontWeight: 600 }}>${bankrollInicial.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                  <span style={{ fontWeight: 600 }}>${inicialState.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
                   <span style={{ color: 'var(--foreground-muted)' }}>Capital actual</span>
-                  <span style={{ fontWeight: 700, color: 'var(--accent-green)' }}>${bankrollActual.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                  <span style={{ fontWeight: 700, color: 'var(--accent-green)' }}>${actualState.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
                 </div>
               </div>
             )}

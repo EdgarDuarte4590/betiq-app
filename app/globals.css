@@ -216,9 +216,11 @@ body {
 @media (min-width: 901px) {
   .dashboard-left {
     grid-column: 1;
+    grid-row: 1;
   }
   .dashboard-right {
     grid-column: 2;
+    grid-row: 1;
   }
 }
 
