@@ -6,6 +6,9 @@ import { extractValueBets, getSmartPicks, calculateBettingStats } from '@/lib/al
 import LocalTime from '@/components/LocalTime';
 import BankrollWidget from '@/components/bankroll/BankrollWidget';
 import PickCard from '@/components/value-bets/PickCard';
+import PickCardSkeleton from '@/components/ui/PickCardSkeleton';
+import { saveOddsSnapshot } from '@/app/actions/snapshots';
+import { Suspense } from 'react';
 
 export default async function DashboardPage() {
   const supabase = await createClient();
@@ -40,6 +43,7 @@ export default async function DashboardPage() {
 
   // ── API + Smart Engine ─────
   const allEvents = await getUpcomingMatches('upcoming');
+  saveOddsSnapshot(allEvents); // fire and forget
   const { upcoming, possiblyLive } = categorizeEventsByTime(allEvents);
 
   const allValidMatches = [...upcoming, ...possiblyLive];
@@ -208,9 +212,11 @@ export default async function DashboardPage() {
                 </h2>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-                {enJuegoPicks.map((pick, i) => (
-                  <PickCard key={`live-${i}`} pick={pick} isLive={true} />
-                ))}
+                <Suspense fallback={<PickCardSkeleton count={3} />}>
+                  {enJuegoPicks.map((pick, i) => (
+                    <PickCard key={`live-${i}`} pick={pick} isLive={true} />
+                  ))}
+                </Suspense>
               </div>
             </div>
           )}
@@ -226,13 +232,15 @@ export default async function DashboardPage() {
               </span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-              {proximosPicks.length === 0 ? (
-                <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--foreground-muted)', fontSize: '0.85rem' }}>
-                  Sin partidos próximos en las siguientes 24 horas.
-                </div>
-              ) : proximosPicks.map((pick, i) => (
-                <PickCard key={`up-${i}`} pick={pick} />
-              ))}
+              <Suspense fallback={<PickCardSkeleton count={3} />}>
+                {proximosPicks.length === 0 ? (
+                  <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--foreground-muted)', fontSize: '0.85rem' }}>
+                    Sin partidos próximos en las siguientes 24 horas.
+                  </div>
+                ) : proximosPicks.map((pick, i) => (
+                  <PickCard key={`up-${i}`} pick={pick} />
+                ))}
+              </Suspense>
             </div>
           </div>
 
@@ -245,9 +253,11 @@ export default async function DashboardPage() {
                 </h2>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-                {mananaPicks.map((pick, i) => (
-                  <PickCard key={`later-${i}`} pick={pick} />
-                ))}
+                <Suspense fallback={<PickCardSkeleton count={3} />}>
+                  {mananaPicks.map((pick, i) => (
+                    <PickCard key={`later-${i}`} pick={pick} />
+                  ))}
+                </Suspense>
               </div>
             </div>
           )}

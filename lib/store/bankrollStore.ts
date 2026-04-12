@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { createClient } from '@/lib/supabase/client';
+import type { User } from '@supabase/supabase-js';
 
 interface BetDraft {
   match: string;
@@ -9,6 +10,8 @@ interface BetDraft {
   league: string;
   pick: string;
   matchTime?: string;
+  sportKey?: string;
+  confidence?: string;
 }
 
 interface BankrollState {
@@ -16,7 +19,7 @@ interface BankrollState {
   loading: boolean;
   isModalOpen: boolean;
   draftBet: BetDraft | null;
-  user: any | null;
+  user: User | null;
   
   openModal: (draft?: Partial<BetDraft>) => void;
   closeModal: () => void;
@@ -44,7 +47,9 @@ export const useBankrollStore = create<BankrollState>((set, get) => ({
       sport: draft.sport || '',
       league: draft.league || '',
       pick: draft.pick || '',
-      matchTime: draft.matchTime || ''
+      matchTime: draft.matchTime || '',
+      sportKey: draft.sportKey || '',
+      confidence: draft.confidence || ''
     } : null 
   }),
   

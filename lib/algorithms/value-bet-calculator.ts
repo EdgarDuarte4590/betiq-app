@@ -10,24 +10,63 @@
 
 import type { OddEvent } from '@/lib/apis/odds-api';
 
+// ========== CONFIGURACIÓN DE SHARP BOOKS ==========
+
+// Pesos de bookmakers: sharp books valen más en el consenso de probabilidad.
+// Los que no están en esta lista reciben peso 1.0 (baseline).
+const BOOKMAKER_WEIGHTS: Record<string, number> = {
+  'pinnacle':         3.0,  // El sharp book por excelencia
+  'betfair_ex_eu':    2.5,  // Exchange — cuotas sin margen
+  'betfair_ex_uk':    2.5,
+  'bookmaker':        2.0,  // Conocido por aceptar ganadores
+  'betsson':          1.5,
+  'unibet_eu':        1.5,
+  'williamhill':      1.3,
+  'bet365':           1.2,
+  'draftkings':       0.8,  // Square book, mercado US menos eficiente
+  'fanduel':          0.8,
+  'bovada':           0.7,
+};
+
+function getBookmakerWeight(bookmakerKey: string): number {
+  return BOOKMAKER_WEIGHTS[bookmakerKey] ?? 1.0;
+}
+
 // ========== FÓRMULAS ==========
+
+/**
+ * Elimina el overround (margen del bookmaker) de un conjunto de cuotas decimales.
+ * Método multiplicativo: normaliza para que las probs implícitas sumen exactamente 1.
+ * 
+ * @param odds - Array de cuotas decimales de TODOS los outcomes del mismo mercado
+ * @returns Array de probabilidades "justas" (sin margen) en el mismo orden
+ */
+export function removeVig(odds: number[]): number[] {
+  const impliedProbs = odds.map(o => 1 / o);
+  const overround = impliedProbs.reduce((s, p) => s + p, 0);
+  return impliedProbs.map(p => p / overround);
+}
 
 export function calculateValuePercentage(winProbability: number, decimalOdds: number): number {
   if (winProbability <= 0 || decimalOdds <= 1) return 0;
   return ((winProbability * decimalOdds) - 1) * 100;
 }
 
+// Kelly criterion actualizado para no apostar sin edge
 export function calculateKellyCriterion(
   winProbability: number,
   decimalOdds: number,
   fraction: number = 0.25
 ): number {
+  const valuePct = calculateValuePercentage(winProbability, decimalOdds);
+  if (valuePct <= 0) return 0;
+  
   const q = 1 - winProbability;
   const b = decimalOdds - 1;
   if (b <= 0) return 0;
   const f_star = ((b * winProbability) - q) / b;
-  if (f_star <= 0) return 0;
-  return (f_star * fraction) * 100;
+  if (f_star <= 0) return 0;  // Sin edge positivo → Kelly = 0
+  return Math.min((f_star * fraction) * 100, 5); // Cap en 5% del bankroll por seguridad
 }
 
 // ========== TYPES ==========
@@ -45,9 +84,28 @@ export interface ValueBetOpportunity {
   marketProbability: number;
   valuePercentage: number;
   kellyStake: number;
+  consensusStrength: number; // 0-1, qué % de bookmakers coincide en la dirección del pick
   sport: string;
   league: string;
   commenceTime: string;
+}
+
+export interface SmartPick {
+  eventId: string;
+  event: string;
+  sport: string;
+  league: string;
+  commenceTime: string;
+  bestPick: string;       // "Gana Arsenal", "Over 2.5", "Empate"
+  bestMarket: string;     // "H2H", "Over/Under", "Empate"
+  oddsRange: string;      // "1.85–2.10"
+  bestOdds: number;
+  valuePercentage: number;
+  kellyStake: number;
+  marketProbability: number;
+  confidence: 'alta' | 'media' | 'baja';
+  bookmakerCount: number;
+  consensusStrength: number; // 0-1, qué % de bookmakers coincide en la dirección del pick
 }
 
 // ========== DEPORTES PRINCIPALES ==========
@@ -60,6 +118,202 @@ export function isMainSport(sportKey: string): boolean {
   return MAIN_SPORTS.some(s => sportKey.includes(s));
 }
 
+// ========== HELPERS DE MERCADOS ==========
+
+interface ParsedMarketPick {
+  fairProb: number;
+  bestOdds: number;
+  bookmakerCount: number; // Count of valid odds for this pick
+  consensusStrength: number;
+  oddsArray: number[];
+  validOdds: number[];
+  bestBookmaker: string;
+}
+
+const MIN_ODDS = 1.50;
+const MAX_ODDS = 5.00;
+
+function parseH2HMarket(event: OddEvent): Map<string, ParsedMarketPick> {
+  const bkFairProbs = new Map<string, Record<string, number>>();
+  for (const bk of event.bookmakers) {
+    const h2h = bk.markets?.find(m => m.key === 'h2h');
+    if (!h2h?.outcomes || h2h.outcomes.length === 0) continue;
+    const prices = h2h.outcomes.map(o => o.price);
+    const names = h2h.outcomes.map(o => o.name);
+    const fairProbs = removeVig(prices);
+    const probMap: Record<string, number> = {};
+    for (let i = 0; i < names.length; i++) {
+        probMap[names[i]] = fairProbs[i];
+    }
+    bkFairProbs.set(bk.key, probMap);
+  }
+
+  const outcomeData = new Map<string, { 
+    odds: {price: number, bkKey: string, bkTitle: string}[],
+  }>();
+
+  for (const bk of event.bookmakers) {
+    const h2h = bk.markets?.find(m => m.key === 'h2h');
+    if (!h2h?.outcomes) continue;
+    for (const o of h2h.outcomes) {
+       if (!outcomeData.has(o.name)) outcomeData.set(o.name, { odds: [] });
+       outcomeData.get(o.name)!.odds.push({ price: o.price, bkKey: bk.key, bkTitle: bk.title });
+    }
+  }
+
+  const result = new Map<string, ParsedMarketPick>();
+  
+  for (const [outcome, data] of outcomeData.entries()) {
+    let totalWeight = 0;
+    let weightedProbSum = 0;
+    for (const odd of data.odds) {
+      const probMap = bkFairProbs.get(odd.bkKey);
+      if (probMap && probMap[outcome] !== undefined) {
+        const w = getBookmakerWeight(odd.bkKey);
+        weightedProbSum += probMap[outcome] * w; // weighted the FAIR probabilities
+        totalWeight += w;
+      }
+    }
+    const fairProb = totalWeight > 0 ? weightedProbSum / totalWeight : 0;
+    
+    const validOddsItems = data.odds.filter(o => o.price >= MIN_ODDS && o.price <= MAX_ODDS);
+    const oddsArray = data.odds.map(o => o.price);
+    const validOdds = validOddsItems.map(o => o.price);
+    
+    let booksSupportingPick = 0;
+    for (const odd of data.odds) {
+        if (odd.price < 2.5) booksSupportingPick++;
+    }
+    const consensusStrength = event.bookmakers.length > 0 ? booksSupportingPick / event.bookmakers.length : 0;
+    
+    let bestOdds = 0;
+    let bestBookmaker = 'N/A';
+    if (validOddsItems.length > 0) {
+      let bestOddsItem = validOddsItems[0];
+      for (const item of validOddsItems) {
+        if (item.price > bestOddsItem.price) {
+          bestOddsItem = item;
+        }
+      }
+      bestOdds = bestOddsItem.price;
+      bestBookmaker = bestOddsItem.bkTitle;
+    } else if (data.odds.length > 0) {
+       bestOdds = Math.max(...oddsArray);
+       const match = data.odds.find(o => o.price === bestOdds);
+       if (match) bestBookmaker = match.bkTitle;
+    }
+    
+    result.set(outcome, {
+      fairProb,
+      bestOdds,
+      bookmakerCount: validOddsItems.length,
+      consensusStrength,
+      oddsArray,
+      validOdds,
+      bestBookmaker
+    });
+  }
+  
+  return result;
+}
+
+function parseTotalsMarket(event: OddEvent): Map<string, ParsedMarketPick> {
+  const bkFairProbs = new Map<string, Record<string, number>>();
+  for (const bk of event.bookmakers) {
+    const totals = bk.markets?.find(m => m.key === 'totals');
+    if (!totals?.outcomes || totals.outcomes.length === 0) continue;
+    
+    const pointsMap = new Map<string, {name: string, price: number}[]>();
+    for (const o of totals.outcomes) {
+       const point = (o as any).point ? String((o as any).point) : 'default';
+       if (!pointsMap.has(point)) pointsMap.set(point, []);
+       pointsMap.get(point)!.push({ name: o.name, price: o.price });
+    }
+    
+    const probMap: Record<string, number> = {};
+    for (const [point, group] of pointsMap.entries()) {
+      if (group.length < 2) continue; // Normally a total outcome requires over/under pair
+      const prices = group.map(x => x.price);
+      const fairProbs = removeVig(prices);
+      for (let i = 0; i < group.length; i++) {
+         probMap[`${group[i].name} ${point === 'default' ? '' : point}`.trim()] = fairProbs[i];
+      }
+    }
+    bkFairProbs.set(bk.key, probMap);
+  }
+
+  const outcomeData = new Map<string, { 
+    odds: {price: number, bkKey: string, bkTitle: string}[],
+  }>();
+
+  for (const bk of event.bookmakers) {
+    const totals = bk.markets?.find(m => m.key === 'totals');
+    if (!totals?.outcomes) continue;
+    for (const o of totals.outcomes) {
+       const point = (o as any).point ? String((o as any).point) : 'default';
+       const pickLabel = `${o.name} ${point === 'default' ? '' : point}`.trim();
+       if (!outcomeData.has(pickLabel)) outcomeData.set(pickLabel, { odds: [] });
+       outcomeData.get(pickLabel)!.odds.push({ price: o.price, bkKey: bk.key, bkTitle: bk.title });
+    }
+  }
+
+  const result = new Map<string, ParsedMarketPick>();
+  
+  for (const [outcome, data] of outcomeData.entries()) {
+    let totalWeight = 0;
+    let weightedProbSum = 0;
+    for (const odd of data.odds) {
+      const probMap = bkFairProbs.get(odd.bkKey);
+      if (probMap && probMap[outcome] !== undefined) {
+        const w = getBookmakerWeight(odd.bkKey);
+        weightedProbSum += probMap[outcome] * w;
+        totalWeight += w;
+      }
+    }
+    const fairProb = totalWeight > 0 ? weightedProbSum / totalWeight : 0;
+    
+    const validOddsItems = data.odds.filter(o => o.price >= MIN_ODDS && o.price <= MAX_ODDS);
+    const oddsArray = data.odds.map(o => o.price);
+    const validOdds = validOddsItems.map(o => o.price);
+    
+    let booksSupportingPick = 0;
+    for (const odd of data.odds) {
+        if (odd.price < 2.5) booksSupportingPick++;
+    }
+    const consensusStrength = event.bookmakers.length > 0 ? booksSupportingPick / event.bookmakers.length : 0;
+    
+    let bestOdds = 0;
+    let bestBookmaker = 'N/A';
+    if (validOddsItems.length > 0) {
+      let bestOddsItem = validOddsItems[0];
+      for (const item of validOddsItems) {
+        if (item.price > bestOddsItem.price) {
+          bestOddsItem = item;
+        }
+      }
+      bestOdds = bestOddsItem.price;
+      bestBookmaker = bestOddsItem.bkTitle;
+    } else if (data.odds.length > 0) {
+       bestOdds = Math.max(...oddsArray);
+       const match = data.odds.find(o => o.price === bestOdds);
+       if (match) bestBookmaker = match.bkTitle;
+    }
+    
+    result.set(outcome, {
+      fairProb,
+      bestOdds,
+      bookmakerCount: validOddsItems.length,
+      consensusStrength,
+      oddsArray,
+      validOdds,
+      bestBookmaker
+    });
+  }
+  
+  return result;
+}
+
+
 // ========== MOTOR PRINCIPAL ==========
 
 export function extractValueBets(
@@ -67,154 +321,55 @@ export function extractValueBets(
   minValueThreshold: number = 2.0,
   filterMainSports: boolean = true
 ): ValueBetOpportunity[] {
-  const MIN_ODDS = 1.50;
-  const MAX_ODDS = 5.00;
-
-  // Mapa: eventId + pick → datos consolidados
-  const consolidatedMap = new Map<string, {
-    eventId: string;
-    event: string;
-    pick: string;
-    market: string;
-    odds: number[];
-    bookmakers: string[];
-    marketProb: number;
-    sport: string;
-    league: string;
-    commenceTime: string;
-  }>();
-
+  const opportunities: ValueBetOpportunity[] = [];
+  
   for (const event of events) {
     if (!event.bookmakers || event.bookmakers.length < 2) continue;
     if (filterMainSports && !isMainSport(event.sport_key)) continue;
 
     const eventLabel = `${event.home_team} vs ${event.away_team}`;
+    const h2hMap = parseH2HMarket(event);
+    const totalsMap = parseTotalsMarket(event);
 
-    // ── H2H / 1X2 ──
-    const teamOddsMap: Record<string, number[]> = {};
-    for (const bk of event.bookmakers) {
-      const h2h = bk.markets?.find(m => m.key === 'h2h');
-      if (!h2h?.outcomes) continue;
-      for (const o of h2h.outcomes) {
-        if (!teamOddsMap[o.name]) teamOddsMap[o.name] = [];
-        teamOddsMap[o.name].push(o.price);
-      }
-    }
-
-    const marketProbH2H: Record<string, number> = {};
-    for (const [team, odds] of Object.entries(teamOddsMap)) {
-      if (odds.length < 1) continue;
-      marketProbH2H[team] = odds.reduce((s, o) => s + (1 / o), 0) / odds.length;
-    }
-
-    for (const bk of event.bookmakers) {
-      const h2h = bk.markets?.find(m => m.key === 'h2h');
-      if (!h2h?.outcomes) continue;
-      for (const o of h2h.outcomes) {
-        if (o.price < MIN_ODDS || o.price > MAX_ODDS) continue;
-        const prob = marketProbH2H[o.name];
-        if (!prob) continue;
-        const value = calculateValuePercentage(prob, o.price);
+    const processMap = (marketMap: Map<string, ParsedMarketPick>, isH2H: boolean) => {
+      for (const [pickLabel, data] of marketMap.entries()) {
+        if (data.validOdds.length === 0) continue;
+        const value = calculateValuePercentage(data.fairProb, data.bestOdds);
         if (value < minValueThreshold) continue;
 
-        const isDrawPick = o.name === 'Draw' || o.name === 'Empate';
-        const pick = isDrawPick ? 'Empate' : `Gana ${o.name}`;
-        const market = isDrawPick ? 'Empate' : 'H2H';
-        const key = `${event.id}::${pick}`;
-
-        if (!consolidatedMap.has(key)) {
-          consolidatedMap.set(key, {
-            eventId: event.id, event: eventLabel, pick, market,
-            odds: [], bookmakers: [], marketProb: prob,
-            sport: event.sport_key, league: event.sport_title,
-            commenceTime: event.commence_time,
-          });
+        let market = 'Unknown';
+        let pick = pickLabel;
+        if (isH2H) {
+           const isDrawPick = pickLabel === 'Draw' || pickLabel === 'Empate';
+           pick = isDrawPick ? 'Empate' : `Gana ${pickLabel}`;
+           market = isDrawPick ? 'Empate' : 'H2H';
+        } else {
+           market = 'Over/Under';
         }
-        const entry = consolidatedMap.get(key)!;
-        entry.odds.push(o.price);
-        if (!entry.bookmakers.includes(bk.title)) {
-          entry.bookmakers.push(bk.title);
-        }
-      }
-    }
 
-    // ── Totals (Over/Under) ──
-    const totalsMap: Record<string, { odds: number[]; bookmakers: string[] }> = {};
-    for (const bk of event.bookmakers) {
-      const totals = bk.markets?.find(m => m.key === 'totals');
-      if (!totals?.outcomes) continue;
-      for (const o of totals.outcomes) {
-        const point = (o as any).point ?? '';
-        const key = `${o.name} ${point}`.trim();
-        if (!totalsMap[key]) totalsMap[key] = { odds: [], bookmakers: [] };
-        totalsMap[key].odds.push(o.price);
-        if (!totalsMap[key].bookmakers.includes(bk.title)) {
-          totalsMap[key].bookmakers.push(bk.title);
-        }
-      }
-    }
-
-    const totalsProbMap: Record<string, number> = {};
-    for (const [key, data] of Object.entries(totalsMap)) {
-      if (data.odds.length < 2) continue;
-      totalsProbMap[key] = data.odds.reduce((s, o) => s + (1 / o), 0) / data.odds.length;
-    }
-
-    for (const [pickLabel, data] of Object.entries(totalsMap)) {
-      const prob = totalsProbMap[pickLabel];
-      if (!prob) continue;
-
-      // Filtrar: solo cuotas válidas entre MIN y MAX
-      const validOdds = data.odds.filter(o => o >= MIN_ODDS && o <= MAX_ODDS);
-      if (validOdds.length === 0) continue;
-
-      const bestOdds = Math.max(...validOdds);
-      const value = calculateValuePercentage(prob, bestOdds);
-      if (value < minValueThreshold) continue;
-
-      const key = `${event.id}::${pickLabel}`;
-      if (!consolidatedMap.has(key)) {
-        consolidatedMap.set(key, {
-          eventId: event.id, event: eventLabel, pick: pickLabel,
-          market: pickLabel.startsWith('Over') ? 'Over/Under' : 'Over/Under',
-          odds: validOdds, bookmakers: data.bookmakers,
-          marketProb: prob, sport: event.sport_key,
-          league: event.sport_title, commenceTime: event.commence_time,
+        opportunities.push({
+          eventId: event.id,
+          event: eventLabel,
+          pick,
+          market,
+          oddsMin: Math.min(...data.validOdds),
+          oddsMax: Math.max(...data.validOdds),
+          oddsBest: data.bestOdds,
+          bestBookmaker: data.bestBookmaker,
+          bookmakerCount: data.bookmakerCount,
+          marketProbability: data.fairProb,
+          valuePercentage: value,
+          kellyStake: calculateKellyCriterion(data.fairProb, data.bestOdds, 0.25),
+          consensusStrength: data.consensusStrength,
+          sport: event.sport_key,
+          league: event.sport_title,
+          commenceTime: event.commence_time,
         });
       }
-    }
-  }
-
-  // Convertir mapa a array de resultados consolidados
-  const opportunities: ValueBetOpportunity[] = [];
-  for (const entry of consolidatedMap.values()) {
-    if (entry.odds.length === 0) continue;
-    const oddsMin = Math.min(...entry.odds);
-    const oddsMax = Math.max(...entry.odds);
-    const oddsBest = oddsMax; // La mejor para el apostador es la más alta
-
-    // El bookmaker que ofrece la mejor cuota
-    // Recorremos para encontrarlo
-    let bestBookmaker = entry.bookmakers[0] || 'N/A';
-
-    const value = calculateValuePercentage(entry.marketProb, oddsBest);
-    const kelly = calculateKellyCriterion(entry.marketProb, oddsBest, 0.25);
-
-    opportunities.push({
-      eventId: entry.eventId,
-      event: entry.event,
-      pick: entry.pick,
-      market: entry.market,
-      oddsMin, oddsMax, oddsBest,
-      bestBookmaker,
-      bookmakerCount: entry.bookmakers.length,
-      marketProbability: entry.marketProb,
-      valuePercentage: value,
-      kellyStake: kelly,
-      sport: entry.sport,
-      league: entry.league,
-      commenceTime: entry.commenceTime,
-    });
+    };
+    
+    processMap(h2hMap, true);
+    processMap(totalsMap, false);
   }
 
   // Deduplicar: solo la MEJOR selección por partido
@@ -244,105 +399,55 @@ export function extractAllValueBets(
   minValueThreshold: number = 2.0,
   filterMainSports: boolean = true
 ): ValueBetOpportunity[] {
-  // Reusar la lógica anterior pero sin el paso de "best per event"
-  const MIN_ODDS = 1.50;
-  const MAX_ODDS = 5.00;
-  const consolidatedMap = new Map<string, {
-    eventId: string; event: string; pick: string; market: string;
-    odds: number[]; bookmakers: string[]; marketProb: number;
-    sport: string; league: string; commenceTime: string;
-  }>();
-
+  const opportunities: ValueBetOpportunity[] = [];
+  
   for (const event of events) {
     if (!event.bookmakers || event.bookmakers.length < 2) continue;
     if (filterMainSports && !isMainSport(event.sport_key)) continue;
+
     const eventLabel = `${event.home_team} vs ${event.away_team}`;
+    const h2hMap = parseH2HMarket(event);
+    const totalsMap = parseTotalsMarket(event);
 
-    // H2H
-    const teamOddsMap: Record<string, number[]> = {};
-    for (const bk of event.bookmakers) {
-      const h2h = bk.markets?.find(m => m.key === 'h2h');
-      if (!h2h?.outcomes) continue;
-      for (const o of h2h.outcomes) {
-        if (!teamOddsMap[o.name]) teamOddsMap[o.name] = [];
-        teamOddsMap[o.name].push(o.price);
-      }
-    }
-    const marketProbH2H: Record<string, number> = {};
-    for (const [team, odds] of Object.entries(teamOddsMap)) {
-      if (odds.length < 1) continue;
-      marketProbH2H[team] = odds.reduce((s, o) => s + (1 / o), 0) / odds.length;
-    }
-    for (const bk of event.bookmakers) {
-      const h2h = bk.markets?.find(m => m.key === 'h2h');
-      if (!h2h?.outcomes) continue;
-      for (const o of h2h.outcomes) {
-        if (o.price < MIN_ODDS || o.price > MAX_ODDS) continue;
-        const prob = marketProbH2H[o.name];
-        if (!prob) continue;
-        const value = calculateValuePercentage(prob, o.price);
+    const processMap = (marketMap: Map<string, ParsedMarketPick>, isH2H: boolean) => {
+      for (const [pickLabel, data] of marketMap.entries()) {
+        if (data.validOdds.length === 0) continue;
+        const value = calculateValuePercentage(data.fairProb, data.bestOdds);
         if (value < minValueThreshold) continue;
-        const isDrawPick = o.name === 'Draw' || o.name === 'Empate';
-        const pick = isDrawPick ? 'Empate' : `Gana ${o.name}`;
-        const market = isDrawPick ? 'Empate' : 'H2H';
-        const key = `${event.id}::${pick}`;
-        if (!consolidatedMap.has(key)) {
-          consolidatedMap.set(key, { eventId: event.id, event: eventLabel, pick, market, odds: [], bookmakers: [], marketProb: prob, sport: event.sport_key, league: event.sport_title, commenceTime: event.commence_time });
+
+        let market = 'Unknown';
+        let pick = pickLabel;
+        if (isH2H) {
+           const isDrawPick = pickLabel === 'Draw' || pickLabel === 'Empate';
+           pick = isDrawPick ? 'Empate' : `Gana ${pickLabel}`;
+           market = isDrawPick ? 'Empate' : 'H2H';
+        } else {
+           market = 'Over/Under';
         }
-        const entry = consolidatedMap.get(key)!;
-        entry.odds.push(o.price);
-        if (!entry.bookmakers.includes(bk.title)) entry.bookmakers.push(bk.title);
-      }
-    }
 
-    // Totals
-    const totalsMap: Record<string, { odds: number[]; bookmakers: string[] }> = {};
-    for (const bk of event.bookmakers) {
-      const totals = bk.markets?.find(m => m.key === 'totals');
-      if (!totals?.outcomes) continue;
-      for (const o of totals.outcomes) {
-        const key = `${o.name} ${(o as any).point ?? ''}`.trim();
-        if (!totalsMap[key]) totalsMap[key] = { odds: [], bookmakers: [] };
-        totalsMap[key].odds.push(o.price);
-        if (!totalsMap[key].bookmakers.includes(bk.title)) totalsMap[key].bookmakers.push(bk.title);
+        opportunities.push({
+          eventId: event.id,
+          event: eventLabel,
+          pick,
+          market,
+          oddsMin: Math.min(...data.validOdds),
+          oddsMax: Math.max(...data.validOdds),
+          oddsBest: data.bestOdds,
+          bestBookmaker: data.bestBookmaker,
+          bookmakerCount: data.bookmakerCount,
+          marketProbability: data.fairProb,
+          valuePercentage: value,
+          kellyStake: calculateKellyCriterion(data.fairProb, data.bestOdds, 0.25),
+          consensusStrength: data.consensusStrength,
+          sport: event.sport_key,
+          league: event.sport_title,
+          commenceTime: event.commence_time,
+        });
       }
-    }
-    const totalsProbMap: Record<string, number> = {};
-    for (const [key, data] of Object.entries(totalsMap)) {
-      if (data.odds.length < 2) continue;
-      totalsProbMap[key] = data.odds.reduce((s, o) => s + (1 / o), 0) / data.odds.length;
-    }
-    for (const [pickLabel, data] of Object.entries(totalsMap)) {
-      const prob = totalsProbMap[pickLabel];
-      if (!prob) continue;
-      const validOdds = data.odds.filter(o => o >= MIN_ODDS && o <= MAX_ODDS);
-      if (validOdds.length === 0) continue;
-      const bestOdds = Math.max(...validOdds);
-      const value = calculateValuePercentage(prob, bestOdds);
-      if (value < minValueThreshold) continue;
-      const key = `${event.id}::${pickLabel}`;
-      if (!consolidatedMap.has(key)) {
-        consolidatedMap.set(key, { eventId: event.id, event: eventLabel, pick: pickLabel, market: 'Over/Under', odds: validOdds, bookmakers: data.bookmakers, marketProb: prob, sport: event.sport_key, league: event.sport_title, commenceTime: event.commence_time });
-      }
-    }
-  }
-
-  const opportunities: ValueBetOpportunity[] = [];
-  for (const entry of consolidatedMap.values()) {
-    if (entry.odds.length === 0) continue;
-    const oddsMin = Math.min(...entry.odds);
-    const oddsMax = Math.max(...entry.odds);
-    const value = calculateValuePercentage(entry.marketProb, oddsMax);
-    const kelly = calculateKellyCriterion(entry.marketProb, oddsMax, 0.25);
-    opportunities.push({
-      eventId: entry.eventId, event: entry.event, pick: entry.pick,
-      market: entry.market, oddsMin, oddsMax, oddsBest: oddsMax,
-      bestBookmaker: entry.bookmakers[0] || 'N/A',
-      bookmakerCount: entry.bookmakers.length,
-      marketProbability: entry.marketProb, valuePercentage: value,
-      kellyStake: kelly, sport: entry.sport, league: entry.league,
-      commenceTime: entry.commenceTime,
-    });
+    };
+    
+    processMap(h2hMap, true);
+    processMap(totalsMap, false);
   }
 
   return opportunities.sort((a, b) => {
@@ -355,23 +460,6 @@ export function extractAllValueBets(
 
 // ========== ANÁLISIS DE MEJOR PICK POR PARTIDO ==========
 
-export interface SmartPick {
-  eventId: string;
-  event: string;
-  sport: string;
-  league: string;
-  commenceTime: string;
-  bestPick: string;       // "Gana Arsenal", "Over 2.5", "Empate"
-  bestMarket: string;     // "H2H", "Over/Under", "Empate"
-  oddsRange: string;      // "1.85–2.10"
-  bestOdds: number;
-  valuePercentage: number;
-  kellyStake: number;
-  marketProbability: number;
-  confidence: 'alta' | 'media' | 'baja';
-  bookmakerCount: number;
-}
-
 /**
  * Analiza todos los mercados de un partido y devuelve EL MEJOR pick.
  * Esto es lo que el usuario ve en el Dashboard — la recomendación del analista.
@@ -380,8 +468,6 @@ export function getSmartPicks(
   events: OddEvent[],
   filterMainSports: boolean = true
 ): SmartPick[] {
-  const MIN_ODDS = 1.50;
-  const MAX_ODDS = 5.00;
   const picks: SmartPick[] = [];
 
   for (const event of events) {
@@ -391,40 +477,28 @@ export function getSmartPicks(
     const eventLabel = `${event.home_team} vs ${event.away_team}`;
     let bestValue = 0;
     let bestPick: SmartPick | null = null;
+    let fallbackPick: SmartPick | null = null;
+    let lowestLoss = -Infinity;
 
-    // Analizar H2H
-    const teamOddsMap: Record<string, number[]> = {};
-    for (const bk of event.bookmakers) {
-      const h2h = bk.markets?.find(m => m.key === 'h2h');
-      if (!h2h?.outcomes) continue;
-      for (const o of h2h.outcomes) {
-        if (!teamOddsMap[o.name]) teamOddsMap[o.name] = [];
-        teamOddsMap[o.name].push(o.price);
-      }
-    }
-    const marketProbH2H: Record<string, number> = {};
-    for (const [team, odds] of Object.entries(teamOddsMap)) {
-      if (odds.length < 1) continue;
-      marketProbH2H[team] = odds.reduce((s, o) => s + (1 / o), 0) / odds.length;
-    }
+    const h2hMap = parseH2HMarket(event);
+    const totalsMap = parseTotalsMarket(event);
 
-    for (const [team, odds] of Object.entries(teamOddsMap)) {
-      const validOdds = odds.filter(o => o >= MIN_ODDS && o <= MAX_ODDS);
-      if (validOdds.length === 0) continue;
-      const prob = marketProbH2H[team];
-      if (!prob) continue;
-      const bestO = Math.max(...validOdds);
-      const value = calculateValuePercentage(prob, bestO);
-      const isDrawPick = team === 'Draw' || team === 'Empate';
-      const pick = isDrawPick ? 'Empate' : `Gana ${team}`;
-      const market = isDrawPick ? 'Empate' : 'H2H';
+    const processMap = (marketMap: Map<string, ParsedMarketPick>, isH2H: boolean) => {
+      for (const [pickLabel, data] of marketMap.entries()) {
+        if (data.validOdds.length === 0) continue;
+        const value = calculateValuePercentage(data.fairProb, data.bestOdds);
+        
+        let market = 'Unknown';
+        let pick = pickLabel;
+        if (isH2H) {
+           const isDrawPick = pickLabel === 'Draw' || pickLabel === 'Empate';
+           pick = isDrawPick ? 'Empate' : `Gana ${pickLabel}`;
+           market = isDrawPick ? 'Empate' : 'H2H';
+        } else {
+           market = 'Over/Under';
+        }
 
-      // Seleccionar si tiene valor O si es simplemente la mejor opción
-      const score = value > 0 ? value : -(1 / bestO) * 100; // Si no hay value, usa prob implícita como fallback
-      
-      if (score > bestValue || !bestPick) {
-        bestValue = score;
-        bestPick = {
+        const candidatePick: SmartPick = {
           eventId: event.id,
           event: eventLabel,
           sport: event.sport_key,
@@ -432,68 +506,52 @@ export function getSmartPicks(
           commenceTime: event.commence_time,
           bestPick: pick,
           bestMarket: market,
-          oddsRange: validOdds.length > 1
-            ? `${Math.min(...validOdds).toFixed(2)}–${Math.max(...validOdds).toFixed(2)}`
-            : bestO.toFixed(2),
-          bestOdds: bestO,
+          oddsRange: data.validOdds.length > 1
+            ? `${Math.min(...data.validOdds).toFixed(2)}–${Math.max(...data.validOdds).toFixed(2)}`
+            : data.bestOdds.toFixed(2),
+          bestOdds: data.bestOdds,
           valuePercentage: Math.max(0, value),
-          kellyStake: calculateKellyCriterion(prob, bestO, 0.25),
-          marketProbability: prob,
+          kellyStake: calculateKellyCriterion(data.fairProb, data.bestOdds, 0.25),
+          marketProbability: data.fairProb,
           confidence: value >= 5 ? 'alta' : value >= 2 ? 'media' : 'baja',
-          bookmakerCount: validOdds.length,
+          bookmakerCount: data.bookmakerCount,
+          consensusStrength: data.consensusStrength,
         };
-      }
-    }
 
-    // Analizar Totals
-    for (const bk of event.bookmakers) {
-      const totals = bk.markets?.find(m => m.key === 'totals');
-      if (!totals?.outcomes) continue;
-      for (const o of totals.outcomes) {
-        if (o.price < MIN_ODDS || o.price > MAX_ODDS) continue;
-        const point = (o as any).point ?? '';
-        const pickLabel = `${o.name} ${point}`.trim();
-
-        // Necesitamos la prob del mercado para este total
-        const allOddsForThis: number[] = [];
-        for (const bk2 of event.bookmakers) {
-          const t2 = bk2.markets?.find(m => m.key === 'totals');
-          if (!t2?.outcomes) continue;
-          const match = t2.outcomes.find(x => `${x.name} ${(x as any).point ?? ''}`.trim() === pickLabel);
-          if (match) allOddsForThis.push(match.price);
-        }
-        if (allOddsForThis.length < 2) continue;
-        const prob = allOddsForThis.reduce((s, x) => s + (1 / x), 0) / allOddsForThis.length;
-        const bestO = Math.max(...allOddsForThis.filter(x => x >= MIN_ODDS && x <= MAX_ODDS));
-        const value = calculateValuePercentage(prob, bestO);
-        const score = value > 0 ? value : -(1 / bestO) * 100;
-
-        if (score > bestValue || !bestPick) {
-          bestValue = score;
-          const validOdds = allOddsForThis.filter(x => x >= MIN_ODDS && x <= MAX_ODDS);
-          bestPick = {
-            eventId: event.id,
-            event: eventLabel,
-            sport: event.sport_key,
-            league: event.sport_title,
-            commenceTime: event.commence_time,
-            bestPick: pickLabel,
-            bestMarket: 'Over/Under',
-            oddsRange: validOdds.length > 1
-              ? `${Math.min(...validOdds).toFixed(2)}–${Math.max(...validOdds).toFixed(2)}`
-              : bestO.toFixed(2),
-            bestOdds: bestO,
-            valuePercentage: Math.max(0, value),
-            kellyStake: calculateKellyCriterion(prob, bestO, 0.25),
-            marketProbability: prob,
-            confidence: value >= 5 ? 'alta' : value >= 2 ? 'media' : 'baja',
-            bookmakerCount: validOdds.length,
-          };
+        if (value > 0) {
+          if (value > bestValue || !bestPick || bestPick.valuePercentage <= 0) {
+            bestValue = value;
+            bestPick = candidatePick;
+          }
+        } else {
+          // If value <= 0, we track it for fallback just in case there is no pick with value
+          const lossExpected = value; // since value is < 0, it represents the expected loss (-5% for example)
+          if (lossExpected > lowestLoss) {
+            lowestLoss = lossExpected;
+            candidatePick.valuePercentage = 0;
+            candidatePick.kellyStake = 0;
+            candidatePick.confidence = 'baja';
+            fallbackPick = Object.assign({}, candidatePick); // important to copy
+          }
         }
       }
-    }
+    };
 
-    if (bestPick) picks.push(bestPick);
+    processMap(h2hMap, true);
+    processMap(totalsMap, false);
+
+    if (bestPick && bestPick.valuePercentage > 0) {
+      picks.push(bestPick);
+    } else if (!bestPick && fallbackPick) {
+      // Solo como fallback si no hay absolutamente ningún pick con valor positivo
+      picks.push(fallbackPick);
+    } else if (bestPick) {
+      // in case we pushed a negative value initially, though we shouldn't because of if(value > 0)
+      bestPick.valuePercentage = 0;
+      bestPick.kellyStake = 0;
+      bestPick.confidence = 'baja';
+      picks.push(bestPick);
+    }
   }
 
   // Ordenar: primero los que tienen valor real, luego por valor descendente

@@ -4,6 +4,7 @@ import { useState, useTransition } from 'react';
 import { DollarSign, Edit3, Check, X, TrendingUp, TrendingDown } from 'lucide-react';
 import { updateBankrollSettings } from '@/app/actions/bets';
 import BankrollWidget from '@/components/bankroll/BankrollWidget';
+import LineChart from '@/components/ui/LineChart';
 import { useBankrollStore } from '@/lib/store/bankrollStore';
 
 interface Props {
@@ -62,19 +63,16 @@ export default function BankrollPageClient({
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
   // Calculate running bankroll from the initial
-  const chartPoints: { label: string; value: number }[] = [];
+  const chartPoints: { label: string; value: number; isNegative: boolean }[] = [];
   let running = bankrollInicial;
   closedBets.forEach((bet, i) => {
     running += bet.profit;
     chartPoints.push({
       label: `#${i + 1}`,
       value: Math.max(0, running),
+      isNegative: bet.profit < 0,
     });
   });
-
-  const maxVal = chartPoints.length > 0 ? Math.max(...chartPoints.map(p => p.value), bankrollInicial) : bankrollInicial;
-  const minVal = chartPoints.length > 0 ? Math.min(...chartPoints.map(p => p.value), bankrollInicial) : 0;
-  const range = maxVal - minVal || 1;
 
   return (
     <div>
@@ -210,79 +208,8 @@ export default function BankrollPageClient({
             </p>
           </div>
         ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <svg
-              viewBox={`0 0 ${Math.max(chartPoints.length * 40 + 40, 300)} 180`}
-              style={{ width: '100%', minWidth: 300, height: 180, display: 'block' }}
-            >
-              {/* Grid lines */}
-              {[0, 0.25, 0.5, 0.75, 1].map((ratio, i) => {
-                const y = 20 + (1 - ratio) * 140;
-                const val = minVal + ratio * range;
-                return (
-                  <g key={i}>
-                    <line x1="40" y1={y} x2={chartPoints.length * 40 + 10} y2={y} stroke="rgba(255,255,255,0.05)" strokeWidth="1" />
-                    <text x="35" y={y + 4} fontSize="9" fill="var(--foreground-muted)" textAnchor="end">${Math.round(val)}</text>
-                  </g>
-                );
-              })}
-
-              {/* Area fill */}
-              <defs>
-                <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="var(--accent-green)" stopOpacity="0.3" />
-                  <stop offset="100%" stopColor="var(--accent-green)" stopOpacity="0" />
-                </linearGradient>
-              </defs>
-              <polyline
-                fill="url(#areaGrad)"
-                stroke="none"
-                points={[
-                  `40,${20 + (1 - (bankrollInicial - minVal) / range) * 140}`,
-                  ...chartPoints.map((p, i) => `${(i + 1) * 40 + 10},${20 + (1 - (p.value - minVal) / range) * 140}`),
-                  `${chartPoints.length * 40 + 10},160`,
-                  `40,160`,
-                ].join(' ')}
-              />
-
-              {/* Line */}
-              <polyline
-                fill="none"
-                stroke="var(--accent-green)"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                points={[
-                  `40,${20 + (1 - (bankrollInicial - minVal) / range) * 140}`,
-                  ...chartPoints.map((p, i) => `${(i + 1) * 40 + 10},${20 + (1 - (p.value - minVal) / range) * 140}`),
-                ].join(' ')}
-              />
-
-              {/* Dots */}
-              {chartPoints.map((p, i) => {
-                const cx = (i + 1) * 40 + 10;
-                const cy = 20 + (1 - (p.value - minVal) / range) * 140;
-                const isWin = bets.filter(b => b.status === 'won' || b.status === 'lost')[i]?.profit >= 0;
-                return (
-                  <circle
-                    key={i}
-                    cx={cx}
-                    cy={cy}
-                    r="4"
-                    fill={isWin ? 'var(--accent-green)' : 'var(--accent-red)'}
-                    stroke="var(--background-card)"
-                    strokeWidth="2"
-                  />
-                );
-              })}
-
-              {/* Labels */}
-              {chartPoints.map((p, i) => (
-                <text key={i} x={(i + 1) * 40 + 10} y="175" fontSize="9" fill="var(--foreground-muted)" textAnchor="middle">
-                  {p.label}
-                </text>
-              ))}
-            </svg>
+          <div>
+            <LineChart data={chartPoints} height={180} />
 
             <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: '0.72rem', color: 'var(--foreground-muted)' }}>
               <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>

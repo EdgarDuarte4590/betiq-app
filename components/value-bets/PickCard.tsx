@@ -23,6 +23,8 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
       league: pick.league,
       pick: pick.bestPick,
       matchTime: pick.commenceTime,
+      sportKey: pick.sport,
+      confidence: pick.confidence,
     });
   };
 

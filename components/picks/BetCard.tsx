@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useTransition } from 'react';
+import { useState, useTransition, useEffect } from 'react';
 import { markBetResult, deleteBet, editBet } from '@/app/actions/bets';
 import { CheckCircle2, XCircle, Clock, Loader2, Trash2, Edit3, Save, X } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 
 interface Bet {
   id: string;
@@ -15,6 +16,7 @@ interface Bet {
   status: string;
   market: string;
   profit: number | null;
+  notes?: string | null;
   created_at: string;
 }
 
@@ -41,11 +43,23 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 export default function BetCard({ bet }: { bet: Bet }) {
+  const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [localStatus, setLocalStatus] = useState(bet.status);
   const [localProfit, setLocalProfit] = useState(bet.profit);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
   const [deleted, setDeleted] = useState(false);
+
+  // Notes state
+  const [notes, setNotes] = useState(bet.notes || '');
+
+  useEffect(() => {
+    if (notes === (bet.notes || '')) return;
+    const timeoutId = setTimeout(() => {
+      editBet(bet.id, { notes });
+    }, 1000);
+    return () => clearTimeout(timeoutId);
+  }, [notes, bet.notes, bet.id]);
 
   // Edit mode state
   const [editing, setEditing] = useState(false);
@@ -71,6 +85,7 @@ export default function BetCard({ bet }: { bet: Bet }) {
         setLocalStatus(result);
         setLocalProfit(res.profit ?? null);
         showFeedback('success', result === 'won' ? `✅ Ganaste $${Math.abs(res.profit ?? 0).toFixed(2)} neto` : '❌ Registrada como perdida');
+        router.refresh();
       } else {
         showFeedback('error', res.error ?? 'Error desconocido');
       }
@@ -83,6 +98,7 @@ export default function BetCard({ bet }: { bet: Bet }) {
       const res = await deleteBet(bet.id, parseFloat(String(bet.stake)));
       if (res.success) {
         setDeleted(true);
+        router.refresh();
       } else {
         showFeedback('error', res.error ?? 'No se pudo eliminar');
       }
@@ -100,6 +116,7 @@ export default function BetCard({ bet }: { bet: Bet }) {
       if (res.success) {
         setEditing(false);
         showFeedback('success', '✅ Apuesta actualizada.');
+        router.refresh();
       } else {
         showFeedback('error', res.error ?? 'Error al editar');
       }
@@ -226,6 +243,26 @@ export default function BetCard({ bet }: { bet: Bet }) {
           {feedback.msg}
         </div>
       )}
+
+      {/* Notas */}
+      <div style={{ marginTop: '0.75rem' }}>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Agrega notas sobre la apuesta..."
+          style={{
+            width: '100%',
+            padding: '0.5rem',
+            borderRadius: '6px',
+            border: '1px solid var(--border-subtle)',
+            background: 'var(--background-card)',
+            color: 'var(--foreground-muted)',
+            fontSize: '0.75rem',
+            minHeight: '2rem',
+            resize: 'vertical'
+          }}
+        />
+      </div>
     </div>
   );
 }

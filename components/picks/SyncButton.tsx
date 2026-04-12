@@ -3,6 +3,7 @@
 import { useState, useTransition } from 'react';
 import { RefreshCw, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { syncScores } from '@/app/actions/syncScores';
+import { useRouter } from 'next/navigation';
 
 export default function SyncButton() {
   const [isPending, startTransition] = useTransition();
@@ -10,6 +11,7 @@ export default function SyncButton() {
     type: 'success' | 'info' | 'error';
     msg: string;
   } | null>(null);
+  const router = useRouter();
 
   const handleSync = () => {
     startTransition(async () => {
@@ -33,6 +35,7 @@ export default function SyncButton() {
           type: 'success',
           msg: `✅ ${res.graded} apuesta(s) calificadas: ${res.won} ganada(s), ${res.lost} perdida(s).${res.skipped > 0 ? ` (${res.skipped} sin resultado aún)` : ''}`,
         });
+        router.refresh();
       }
 
       // Auto-dismiss after 8 seconds

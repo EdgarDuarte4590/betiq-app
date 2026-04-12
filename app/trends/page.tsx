@@ -1,7 +1,8 @@
 import { createClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
-import { TrendingUp, BarChart2, Trophy, Target, DollarSign, Activity } from 'lucide-react';
+import { TrendingUp, BarChart2, Trophy, Target, DollarSign, Activity, Compass } from 'lucide-react';
 import { calculateBettingStats } from '@/lib/algorithms/value-bet-calculator';
+import LineChart from '@/components/ui/LineChart';
 
 export default async function TrendsPage() {
   const supabase = await createClient();
@@ -66,6 +67,39 @@ export default async function TrendsPage() {
     };
   });
 
+  const chartPoints = profitHistory.map((p, i) => ({
+    label: `#${i + 1}`,
+    value: Math.max(0, p.profit), // Just for scaling if needed, better to map raw profit if LineChart supports it. LineChart handles negatives.
+    isNegative: p.profit < 0,
+  }));
+  // LineChart uses value directly. Note: Reusing the same chart with cumulative profit.
+  const chartData = profitHistory.map((p, i) => ({
+    label: p.date,
+    value: p.profit,
+    isNegative: p.profit < 0
+  }));
+
+  // Calibración del sistema
+  const confMap = new Map<string, typeof closedBets>();
+  for (const bet of closedBets) {
+    const conf = bet.confidence;
+    if (conf) {
+      if (!confMap.has(conf)) confMap.set(conf, []);
+      confMap.get(conf)!.push(bet);
+    }
+  }
+
+  const calibrationStats = Array.from(confMap.entries()).map(([confidence, bets]) => {
+    const stats = calculateBettingStats(bets.map(b => ({
+      status: b.status, stake: parseFloat(b.stake ?? '0'),
+      odds: parseFloat(b.odds ?? '0'), profit: parseFloat(b.profit ?? '0'),
+    })));
+    return { confidence, ...stats };
+  }).sort((a, b) => {
+    const order: Record<string, number> = { 'alta': 3, 'media': 2, 'baja': 1 };
+    return (order[b.confidence] || 0) - (order[a.confidence] || 0);
+  });
+
   // Racha actual
   let currentStreak = 0;
   let streakType: 'won' | 'lost' | 'none' = 'none';
@@ -128,34 +162,48 @@ export default async function TrendsPage() {
             ))}
           </div>
 
-          {/* Gráfico de profit acumulado (ASCII sparkline visual) */}
+          {/* Gráfico de profit acumulado */}
           {profitHistory.length > 0 && (
             <div className="card">
               <h3 style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '1rem' }}>📈 Evolución del Profit</h3>
-              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 120, padding: '0 0.5rem' }}>
-                {profitHistory.map((point, i) => {
-                  const maxAbs = Math.max(...profitHistory.map(p => Math.abs(p.profit)), 1);
-                  const heightPct = Math.abs(point.profit) / maxAbs * 100;
-                  const isPositive = point.profit >= 0;
+              <LineChart data={chartData} height={180} />
+            </div>
+          )}
+
+          {/* Calibración del sistema */}
+          {calibrationStats.length > 0 && (
+            <div className="card">
+              <h3 style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Compass size={16} color="var(--accent-gold)" /> 
+                Calibración del Sistema
+              </h3>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem' }}>
+                {calibrationStats.map(({ confidence, total, won, lost, winRate }, i) => {
+                  const colors = {
+                    alta: 'var(--accent-green)',
+                    media: 'var(--accent-gold)',
+                    baja: 'var(--foreground-muted)'
+                  };
+                  const color = colors[confidence as keyof typeof colors] || 'var(--foreground)';
+                  
                   return (
-                    <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center', height: '100%' }} title={`${point.date}: $${point.profit.toFixed(2)}`}>
-                      <div style={{
-                        width: '100%',
-                        maxWidth: 24,
-                        height: `${Math.max(heightPct, 4)}%`,
-                        borderRadius: '3px 3px 0 0',
-                        background: isPositive
-                          ? 'linear-gradient(180deg, var(--accent-green), rgba(0,214,143,0.3))'
-                          : 'linear-gradient(180deg, var(--accent-red), rgba(239,68,68,0.3))',
-                        transition: 'height 0.3s',
-                      }} />
+                    <div key={i} style={{ padding: '1rem', background: 'var(--background-secondary)', borderRadius: 10, border: '1px solid var(--border-subtle)', borderLeft: `3px solid ${color}` }}>
+                      <div style={{ fontWeight: 700, fontSize: '0.85rem', marginBottom: 8, textTransform: 'capitalize', color }}>
+                        Confianza {confidence}
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                        <div>
+                          <div style={{ fontSize: '0.6rem', color: 'var(--foreground-muted)' }}>Bets</div>
+                          <div style={{ fontWeight: 700 }}>{total}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '0.6rem', color: 'var(--foreground-muted)' }}>Win Rate</div>
+                          <div style={{ fontWeight: 700, color: winRate >= 50 ? 'var(--accent-green)' : 'var(--accent-red)' }}>{winRate.toFixed(0)}%</div>
+                        </div>
+                      </div>
                     </div>
                   );
                 })}
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: '0.65rem', color: 'var(--foreground-subtle)' }}>
-                <span>{profitHistory[0]?.date}</span>
-                <span>{profitHistory[profitHistory.length - 1]?.date}</span>
               </div>
             </div>
           )}

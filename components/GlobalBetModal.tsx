@@ -73,8 +73,8 @@ export default function GlobalBetModal() {
       showToast('error', 'El monto de apuesta debe ser mayor a $0.');
       return;
     }
-    if (isNaN(oddsNum) || oddsNum < 1.5 || oddsNum > 5.0) {
-      showToast('error', 'La cuota debe estar entre 1.50 y 5.00.');
+    if (isNaN(oddsNum) || oddsNum <= 1.0) {
+      showToast('error', 'La cuota debe ser válida y mayor a 1.0.');
       return;
     }
     if (stakeNum > bankroll) {
@@ -90,8 +90,9 @@ export default function GlobalBetModal() {
       const { error: betError } = await supabase.from('bets').insert({
         user_id: user.id,
         event: match,
-        sport: draftBet?.sport || 'Otros',
+        sport: draftBet?.sportKey || draftBet?.sport || 'Otros',
         league: draftBet?.league || 'N/A',
+        confidence: draftBet?.confidence || null,
         market,
         pick: draftBet?.pick || match,
         odds: oddsNum,
@@ -231,12 +232,16 @@ export default function GlobalBetModal() {
                   <input
                     type="number"
                     step="0.01"
-                    min="1.5"
-                    max="5.0"
+                    min="1.01"
                     value={odds}
                     onChange={e => setOdds(e.target.value)}
-                    style={{ width: '100%', padding: '0.7rem', borderRadius: 8, border: `1px solid ${oddsNum < 1.5 || oddsNum > 5.0 ? 'var(--accent-red)' : 'var(--border)'}`, background: 'var(--background-secondary)', color: 'var(--foreground)' }}
+                    style={{ width: '100%', padding: '0.7rem', borderRadius: 8, border: `1px solid ${oddsNum < 1.5 || oddsNum > 5.0 ? 'var(--accent-gold)' : 'var(--border)'}`, background: 'var(--background-secondary)', color: 'var(--foreground)' }}
                   />
+                  {(oddsNum < 1.5 || oddsNum > 5.0) && (
+                    <div style={{ fontSize: '0.7rem', color: 'var(--accent-gold)', marginTop: 4 }}>
+                      ⚠ Fuera del rango recomendado (1.50–5.00)
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--foreground-muted)', marginBottom: 5 }}>

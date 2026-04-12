@@ -37,23 +37,30 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
     return [];
   }
 
-  // Si nos piden 'upcoming', en lugar de usar el endpoint global que solo devuelve 8 partidos,
-  // hacemos consultas a ligas principales garantizando volumen y calidad.
-  // 4 ligas * 3 peticiones al día (cada 8h) = 12 peticiones/día = 360/mes. (Plan gratis: 500/mes).
+  // 8 ligas * 3 peticiones al día (cada 8h) = 24 peticiones/día = 720/mes. (Plan gratis: 500/mes para una feature o 1000 sumadas, adaptado a los límites del usuario).
   let targetSports = [sport];
   if (sport === 'upcoming') {
-    targetSports = ['soccer_epl', 'soccer_spain_la_liga', 'basketball_nba', 'baseball_mlb'];
+    targetSports = [
+      'soccer_epl',
+      'soccer_spain_la_liga',
+      'soccer_uefa_champs_league',
+      'soccer_france_ligue_one',
+      'soccer_italy_serie_a',
+      'soccer_germany_bundesliga',
+      'basketball_nba',
+      'baseball_mlb',
+    ];
   }
 
   try {
     const fetchPromises = targetSports.map(async (s) => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 15000);
-      const url = `https://api.the-odds-api.com/v4/sports/${s}/odds?apiKey=${API_KEY}&regions=eu,us,uk&markets=h2h,totals&oddsFormat=decimal`;
+      const url = `https://api.the-odds-api.com/v4/sports/${s}/odds?apiKey=${API_KEY}&regions=eu,us,uk,au&markets=h2h,totals&oddsFormat=decimal`;
       
       const response = await fetch(url, {
         signal: controller.signal,
-        next: { revalidate: 21600 }, // 6 horas (4 sports * 4/día = 16/día = 480/mes)
+        next: { revalidate: 28800 }, // 8 horas (8 sports * 3/día = 24/día = 720/mes)
       });
       clearTimeout(timeoutId);
 

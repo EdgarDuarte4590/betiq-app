@@ -169,7 +169,7 @@ export async function deleteBet(betId: string, stake: number) {
  */
 export async function editBet(
   betId: string,
-  updates: { event?: string; pick?: string; odds?: number; stake?: number; market?: string }
+  updates: { event?: string; pick?: string; odds?: number; stake?: number; market?: string; notes?: string }
 ) {
   const supabase = await createClient();
 
