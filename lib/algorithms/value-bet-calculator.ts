@@ -540,17 +540,20 @@ export function getSmartPicks(
     processMap(h2hMap, true);
     processMap(totalsMap, false);
 
-    if (bestPick && bestPick.valuePercentage > 0) {
-      picks.push(bestPick);
-    } else if (!bestPick && fallbackPick) {
+    const bp = bestPick as SmartPick | null;
+    const fp = fallbackPick as SmartPick | null;
+
+    if (bp && bp.valuePercentage > 0) {
+      picks.push(bp);
+    } else if (!bp && fp) {
       // Solo como fallback si no hay absolutamente ningún pick con valor positivo
-      picks.push(fallbackPick);
-    } else if (bestPick) {
+      picks.push(fp);
+    } else if (bp) {
       // in case we pushed a negative value initially, though we shouldn't because of if(value > 0)
-      bestPick.valuePercentage = 0;
-      bestPick.kellyStake = 0;
-      bestPick.confidence = 'baja';
-      picks.push(bestPick);
+      bp.valuePercentage = 0;
+      bp.kellyStake = 0;
+      bp.confidence = 'baja';
+      picks.push(bp);
     }
   }
 
