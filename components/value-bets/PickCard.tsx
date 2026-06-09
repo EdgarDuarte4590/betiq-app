@@ -55,9 +55,14 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
         <span style={{ fontSize: '0.68rem', color: 'var(--foreground-subtle)' }}>
           · <LocalTime isoString={pick.commenceTime} format="datetime" />
         </span>
-        {pick.valuePercentage > 0 && !isLive && (
+        {pick.valuePercentage > 0 && !isLive && !pick.isFallback && (
           <span style={{ marginLeft: 'auto', padding: '1px 8px', borderRadius: 99, background: conf.bg, color: conf.color, fontSize: '0.65rem', fontWeight: 700 }}>
             {conf.label}
+          </span>
+        )}
+        {pick.isFallback && !isLive && (
+          <span style={{ marginLeft: 'auto', padding: '1px 8px', borderRadius: 99, background: 'rgba(148,163,184,0.10)', color: '#64748b', fontSize: '0.65rem', fontWeight: 600 }}>
+            👁️ Monitorear
           </span>
         )}
         {isLive && (

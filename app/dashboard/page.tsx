@@ -43,7 +43,11 @@ export default async function DashboardPage() {
 
   // ── API + Smart Engine ─────
   const allEvents = await getUpcomingMatches('upcoming');
-  saveOddsSnapshot(allEvents); // fire and forget
+  try {
+    await saveOddsSnapshot(allEvents); 
+  } catch (e) {
+    console.error('Error in saveOddsSnapshot:', e);
+  }
   const { upcoming, possiblyLive } = categorizeEventsByTime(allEvents);
 
   const allValidMatches = [...upcoming, ...possiblyLive];
@@ -228,7 +232,7 @@ export default async function DashboardPage() {
                 Próximas 24 Horas
               </h2>
               <span style={{ fontSize: '0.7rem', color: 'var(--foreground-muted)' }}>
-                ⚽🏀⚾ Clic para apostar
+                🏆🏀⚾ Clic para apostar
               </span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>

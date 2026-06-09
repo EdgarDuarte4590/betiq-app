@@ -200,10 +200,11 @@ export default function GlobalBetModal() {
                     <option value="H2H">Ganador (1X2 / H2H)</option>
                     <option value="Empate">Empate</option>
                   </optgroup>
-                  <optgroup label="Fútbol">
+                  <optgroup label="Mundial / Selecciones">
                     <option value="Goles +1.5">Over/Under Goles (1.5)</option>
                     <option value="Goles +2.5">Over/Under Goles (2.5)</option>
                     <option value="Ambos Anotan">Ambos Equipos Anotan (BTTS)</option>
+                    <option value="Clasificación">Clasificación de Grupo</option>
                     <option value="Tarjetas">Total Tarjetas</option>
                     <option value="Corners">Tiros de Esquina</option>
                   </optgroup>

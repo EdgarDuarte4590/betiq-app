@@ -1,3 +1,5 @@
+// Dynamic imports are used inside functions to prevent "Module not found: fs" in Client Components
+
 export interface OddEvent {
   id: string;
   sport_key: string;
@@ -37,18 +39,29 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
     return [];
   }
 
-  // 8 ligas * 3 peticiones al día (cada 8h) = 24 peticiones/día = 720/mes. (Plan gratis: 500/mes para una feature o 1000 sumadas, adaptado a los límites del usuario).
+  // MOCK SYSTEM para entorno de Desarrollo (Evita consumir peticiones reales de la API)
+  if (process.env.NODE_ENV === 'development') {
+    try {
+      const fs = await import('fs');
+      const path = await import('path');
+      const mockPath = path.join(process.cwd(), 'lib', 'apis', 'odds-mock.json');
+      if (fs.existsSync(mockPath)) {
+        const fileData = fs.readFileSync(mockPath, 'utf8');
+        console.log('[OddsAPI] 🧪 Usando MOCK DATA local para ahorrar peticiones (odds-mock.json)');
+        return JSON.parse(fileData) as OddEvent[];
+      }
+    } catch (e) {
+      console.warn('[OddsAPI] Error leyendo mock data. Se usará la API real.', e);
+    }
+  }
+
+  // 3 deportes × 4 peticiones al día (cada 6h) = 12 peticiones/día = 360/mes (Plan free: 500/mes)
   let targetSports = [sport];
   if (sport === 'upcoming') {
     targetSports = [
-      'soccer_epl',
-      'soccer_spain_la_liga',
-      'soccer_uefa_champs_league',
-      'soccer_france_ligue_one',
-      'soccer_italy_serie_a',
-      'soccer_germany_bundesliga',
-      'basketball_nba',
-      'baseball_mlb',
+      'soccer_fifa_world_cup',    // ⚽ Mundial 2026 (USA/México/Canadá)
+      'basketball_nba',           // 🏀 Finales NBA
+      'baseball_mlb',             // ⚾ Temporada regular MLB
     ];
   }
 
@@ -60,17 +73,34 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
       
       const response = await fetch(url, {
         signal: controller.signal,
-        next: { revalidate: 28800 }, // 8 horas (8 sports * 3/día = 24/día = 720/mes)
+        next: { revalidate: 21600 }, // 6 horas (3 sports × 4/día = 12/día = 360/mes)
       });
       clearTimeout(timeoutId);
 
-      if (!response.ok) return [];
+      if (!response.ok) {
+        console.error(`[OddsAPI] Falla al obtener ${s}. Código: ${response.status}. Utilizados: ${response.headers.get('x-requests-used')}, Restantes: ${response.headers.get('x-requests-remaining')}`);
+        return [];
+      }
       return await response.json();
     });
 
     const results = await Promise.all(fetchPromises);
     // Flatten array of arrays
     const allEvents: OddEvent[] = results.flat();
+
+    // Guardamos las respuestas en el archivo mock para que la próxima vez no gaste cuotas en local
+    if (process.env.NODE_ENV === 'development' && allEvents.length > 0) {
+      try {
+        const fs = await import('fs');
+        const path = await import('path');
+        const mockPath = path.join(process.cwd(), 'lib', 'apis', 'odds-mock.json');
+        fs.writeFileSync(mockPath, JSON.stringify(allEvents, null, 2));
+        console.log('[OddsAPI] 💾 Guardado odds-mock.json exitosamente para futuras pruebas locales');
+      } catch (e) {
+        console.error('[OddsAPI] Error al guardar mock data:', e);
+      }
+    }
+
     return allEvents;
   } catch (error: any) {
     console.error('[OddsAPI] Error de red principal:', error);
@@ -116,6 +146,7 @@ export function categorizeEventsByTime(events: OddEvent[]): {
  * Retorna el ícono de emoji y el color del deporte
  */
 export function getSportMeta(sportKey: string): { icon: string; color: string } {
+  if (sportKey.includes('fifa') || sportKey.includes('world_cup')) return { icon: '🏆', color: '#fbbf24' };
   if (sportKey.includes('soccer')) return { icon: '⚽', color: '#4ade80' };
   if (sportKey.includes('basketball')) return { icon: '🏀', color: '#fb923c' };
   if (sportKey.includes('baseball')) return { icon: '⚾', color: '#60a5fa' };

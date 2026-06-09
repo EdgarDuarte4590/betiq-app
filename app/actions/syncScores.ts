@@ -182,13 +182,24 @@ export async function syncScores(): Promise<{
   }
 
   // 2. Map sport names from our DB to API sport keys
+  // Dinámico: si el bet ya tiene un sport_key válido de la API, lo usamos directamente.
+  // Solo usamos fallbacks para emojis o valores genéricos.
   const sportKeyMap: Record<string, string> = {
-    'soccer_epl': 'soccer_epl',
-    'soccer_spain_la_liga': 'soccer_spain_la_liga',
+    // Temporada actual — Mundial 2026
+    'soccer_fifa_world_cup': 'soccer_fifa_world_cup',
+    // Ligas activas
     'basketball_nba': 'basketball_nba',
     'baseball_mlb': 'baseball_mlb',
-    // Generic fallbacks
-    '⚽': 'soccer_epl',
+    // Legado — ligas europeas (para grading de bets viejas que quedaron pendientes)
+    'soccer_epl': 'soccer_epl',
+    'soccer_spain_la_liga': 'soccer_spain_la_liga',
+    'soccer_uefa_champs_league': 'soccer_uefa_champs_league',
+    'soccer_france_ligue_one': 'soccer_france_ligue_one',
+    'soccer_italy_serie_a': 'soccer_italy_serie_a',
+    'soccer_germany_bundesliga': 'soccer_germany_bundesliga',
+    // Generic emoji fallbacks
+    '⚽': 'soccer_fifa_world_cup',
+    '🏆': 'soccer_fifa_world_cup',
     '🏀': 'basketball_nba',
     '⚾': 'baseball_mlb',
   };
@@ -197,18 +208,17 @@ export async function syncScores(): Promise<{
   const sportKeys = new Set<string>();
   for (const bet of pendingBets) {
     const key = sportKeyMap[bet.sport] || bet.sport;
-    // Try to detect sport from the stored sport field
-    if (key.includes('soccer') || key.includes('⚽')) {
-      sportKeys.add('soccer_epl');
-      sportKeys.add('soccer_spain_la_liga');
+    // Si el key es un sport_key válido de la API, úsalo directamente
+    if (key.includes('soccer') || key.includes('⚽') || key.includes('🏆')) {
+      // Usar el key específico si existe en el mapa, si no el genérico del Mundial
+      sportKeys.add(sportKeyMap[bet.sport] || 'soccer_fifa_world_cup');
     } else if (key.includes('basketball') || key.includes('🏀')) {
       sportKeys.add('basketball_nba');
     } else if (key.includes('baseball') || key.includes('⚾')) {
       sportKeys.add('baseball_mlb');
     } else {
-      // Default: fetch all our tracked leagues
-      sportKeys.add('soccer_epl');
-      sportKeys.add('soccer_spain_la_liga');
+      // Default: fetch las ligas activas actuales
+      sportKeys.add('soccer_fifa_world_cup');
       sportKeys.add('basketball_nba');
       sportKeys.add('baseball_mlb');
     }

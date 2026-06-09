@@ -53,6 +53,9 @@ export function calculateValuePercentage(winProbability: number, decimalOdds: nu
 }
 
 // Kelly criterion actualizado para no apostar sin edge
+// Kelly minimum threshold: stakes below this % are not worth the effort
+const KELLY_MIN_THRESHOLD = 0.5;
+
 export function calculateKellyCriterion(
   winProbability: number,
   decimalOdds: number,
@@ -66,7 +69,9 @@ export function calculateKellyCriterion(
   if (b <= 0) return 0;
   const f_star = ((b * winProbability) - q) / b;
   if (f_star <= 0) return 0;  // Sin edge positivo → Kelly = 0
-  return Math.min((f_star * fraction) * 100, 5); // Cap en 5% del bankroll por seguridad
+  const kellyPct = Math.min((f_star * fraction) * 100, 5); // Cap en 5% del bankroll por seguridad
+  // Si el stake sugerido es menor al threshold mínimo, no vale la pena
+  return kellyPct < KELLY_MIN_THRESHOLD ? 0 : kellyPct;
 }
 
 // ========== TYPES ==========
@@ -106,6 +111,7 @@ export interface SmartPick {
   confidence: 'alta' | 'media' | 'baja';
   bookmakerCount: number;
   consensusStrength: number; // 0-1, qué % de bookmakers coincide en la dirección del pick
+  isFallback: boolean;       // true = no tiene value edge real, solo la mejor opción disponible
 }
 
 // ========== DEPORTES PRINCIPALES ==========
@@ -180,11 +186,18 @@ function parseH2HMarket(event: OddEvent): Map<string, ParsedMarketPick> {
     const oddsArray = data.odds.map(o => o.price);
     const validOdds = validOddsItems.map(o => o.price);
     
+    // Consensus: cuántos bookmakers tienen este outcome como favorito (menor cuota = mayor prob)
+    // Comparamos contra la mediana de cuotas de este outcome para determinar "apoyo"
+    const sortedPrices = data.odds.map(o => o.price).sort((a, b) => a - b);
+    const medianPrice = sortedPrices.length > 0
+      ? sortedPrices[Math.floor(sortedPrices.length / 2)]
+      : 999;
     let booksSupportingPick = 0;
     for (const odd of data.odds) {
-        if (odd.price < 2.5) booksSupportingPick++;
+        // Un book "apoya" al pick si su cuota es <= a la mediana (favorece al outcome)
+        if (odd.price <= medianPrice) booksSupportingPick++;
     }
-    const consensusStrength = event.bookmakers.length > 0 ? booksSupportingPick / event.bookmakers.length : 0;
+    const consensusStrength = data.odds.length > 0 ? booksSupportingPick / data.odds.length : 0;
     
     let bestOdds = 0;
     let bestBookmaker = 'N/A';
@@ -276,11 +289,16 @@ function parseTotalsMarket(event: OddEvent): Map<string, ParsedMarketPick> {
     const oddsArray = data.odds.map(o => o.price);
     const validOdds = validOddsItems.map(o => o.price);
     
+    // Consensus: cuántos bookmakers tienen este outcome como favorito
+    const sortedPrices = data.odds.map(o => o.price).sort((a, b) => a - b);
+    const medianPrice = sortedPrices.length > 0
+      ? sortedPrices[Math.floor(sortedPrices.length / 2)]
+      : 999;
     let booksSupportingPick = 0;
     for (const odd of data.odds) {
-        if (odd.price < 2.5) booksSupportingPick++;
+        if (odd.price <= medianPrice) booksSupportingPick++;
     }
-    const consensusStrength = event.bookmakers.length > 0 ? booksSupportingPick / event.bookmakers.length : 0;
+    const consensusStrength = data.odds.length > 0 ? booksSupportingPick / data.odds.length : 0;
     
     let bestOdds = 0;
     let bestBookmaker = 'N/A';
@@ -516,6 +534,7 @@ export function getSmartPicks(
           confidence: value >= 5 ? 'alta' : value >= 2 ? 'media' : 'baja',
           bookmakerCount: data.bookmakerCount,
           consensusStrength: data.consensusStrength,
+          isFallback: false, // Will be set to true below if no value edge
         };
 
         if (value > 0) {
@@ -531,6 +550,7 @@ export function getSmartPicks(
             candidatePick.valuePercentage = 0;
             candidatePick.kellyStake = 0;
             candidatePick.confidence = 'baja';
+            candidatePick.isFallback = true;
             fallbackPick = Object.assign({}, candidatePick); // important to copy
           }
         }
@@ -553,6 +573,7 @@ export function getSmartPicks(
       bp.valuePercentage = 0;
       bp.kellyStake = 0;
       bp.confidence = 'baja';
+      bp.isFallback = true;
       picks.push(bp);
     }
   }
