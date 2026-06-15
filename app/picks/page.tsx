@@ -9,15 +9,15 @@ export default async function PicksPage() {
   const supabase = await createClient();
 
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) redirect('/login');
+  // if (!user) redirect('/login'); // Temporalmente deshabilitado
 
-  const { data: bets = [] } = await supabase
+  const { data: bets = [] } = user ? await supabase
     .from('bets')
     .select('*')
     .eq('user_id', user.id)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false }) : { data: [] };
 
-  const allBets = bets ?? [];
+  const allBets = (bets as any[]) ?? [];
   const stats = calculateBettingStats(allBets.map(b => ({
     status: b.status,
     stake: parseFloat(b.stake),

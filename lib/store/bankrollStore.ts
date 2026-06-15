@@ -9,6 +9,7 @@ interface BetDraft {
   sport: string;
   league: string;
   pick: string;
+  market?: string;
   matchTime?: string;
   sportKey?: string;
   confidence?: string;
@@ -47,6 +48,7 @@ export const useBankrollStore = create<BankrollState>((set, get) => ({
       sport: draft.sport || '',
       league: draft.league || '',
       pick: draft.pick || '',
+      market: draft.market || '',
       matchTime: draft.matchTime || '',
       sportKey: draft.sportKey || '',
       confidence: draft.confidence || ''

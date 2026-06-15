@@ -89,7 +89,8 @@ export interface ValueBetOpportunity {
   marketProbability: number;
   valuePercentage: number;
   kellyStake: number;
-  consensusStrength: number; // 0-1, qué % de bookmakers coincide en la dirección del pick
+  consensusStrength: number; // 0-1: fracción de libros cuya prob fair supera el 50%
+  pinnacleAligns: boolean;   // true si Pinnacle/Betfair respaldan el pick
   sport: string;
   league: string;
   commenceTime: string;
@@ -110,7 +111,8 @@ export interface SmartPick {
   marketProbability: number;
   confidence: 'alta' | 'media' | 'baja';
   bookmakerCount: number;
-  consensusStrength: number; // 0-1, qué % de bookmakers coincide en la dirección del pick
+  consensusStrength: number; // 0-1: fracción de libros que coinciden en el pick
+  pinnacleAligns: boolean;   // true si sharp books respaldan el pick
   isFallback: boolean;       // true = no tiene value edge real, solo la mejor opción disponible
 }
 
@@ -130,11 +132,15 @@ interface ParsedMarketPick {
   fairProb: number;
   bestOdds: number;
   bookmakerCount: number; // Count of valid odds for this pick
-  consensusStrength: number;
+  consensusStrength: number; // fraction of books whose fair prob > 0.5 for this outcome
+  pinnacleAligns: boolean;   // whether sharp books (Pinnacle/Betfair) back this pick
   oddsArray: number[];
   validOdds: number[];
   bestBookmaker: string;
 }
+
+// Sharp books used for consensus validation
+const SHARP_BOOK_KEYS = new Set(['pinnacle', 'betfair_ex_eu', 'betfair_ex_uk', 'bookmaker']);
 
 const MIN_ODDS = 1.50;
 const MAX_ODDS = 5.00;
@@ -186,18 +192,30 @@ function parseH2HMarket(event: OddEvent): Map<string, ParsedMarketPick> {
     const oddsArray = data.odds.map(o => o.price);
     const validOdds = validOddsItems.map(o => o.price);
     
-    // Consensus: cuántos bookmakers tienen este outcome como favorito (menor cuota = mayor prob)
-    // Comparamos contra la mediana de cuotas de este outcome para determinar "apoyo"
-    const sortedPrices = data.odds.map(o => o.price).sort((a, b) => a - b);
-    const medianPrice = sortedPrices.length > 0
-      ? sortedPrices[Math.floor(sortedPrices.length / 2)]
-      : 999;
-    let booksSupportingPick = 0;
+    // ── REAL Consensus: fracción de libros donde prob fair del outcome > 50% ──
+    // Para cada libro que tiene prob map, verificamos si da probabilidad > 0.5 al outcome
+    let booksAgreeing = 0;
+    let booksTotal = 0;
     for (const odd of data.odds) {
-        // Un book "apoya" al pick si su cuota es <= a la mediana (favorece al outcome)
-        if (odd.price <= medianPrice) booksSupportingPick++;
+      const probMap = bkFairProbs.get(odd.bkKey);
+      if (probMap && probMap[outcome] !== undefined) {
+        booksTotal++;
+        if (probMap[outcome] > 0.5) booksAgreeing++; // majority-probability agreement
+      }
     }
-    const consensusStrength = data.odds.length > 0 ? booksSupportingPick / data.odds.length : 0;
+    const consensusStrength = booksTotal > 0 ? booksAgreeing / booksTotal : 0;
+
+    // ── Sharp book alignment: ¿Pinnacle o Betfair respaldan el pick? ──
+    let pinnacleAligns = false;
+    for (const odd of data.odds) {
+      if (SHARP_BOOK_KEYS.has(odd.bkKey)) {
+        const probMap = bkFairProbs.get(odd.bkKey);
+        if (probMap && (probMap[outcome] ?? 0) > 0.5) {
+          pinnacleAligns = true;
+          break;
+        }
+      }
+    }
     
     let bestOdds = 0;
     let bestBookmaker = 'N/A';
@@ -221,6 +239,7 @@ function parseH2HMarket(event: OddEvent): Map<string, ParsedMarketPick> {
       bestOdds,
       bookmakerCount: validOddsItems.length,
       consensusStrength,
+      pinnacleAligns,
       oddsArray,
       validOdds,
       bestBookmaker
@@ -289,17 +308,30 @@ function parseTotalsMarket(event: OddEvent): Map<string, ParsedMarketPick> {
     const oddsArray = data.odds.map(o => o.price);
     const validOdds = validOddsItems.map(o => o.price);
     
-    // Consensus: cuántos bookmakers tienen este outcome como favorito
-    const sortedPrices = data.odds.map(o => o.price).sort((a, b) => a - b);
-    const medianPrice = sortedPrices.length > 0
-      ? sortedPrices[Math.floor(sortedPrices.length / 2)]
-      : 999;
-    let booksSupportingPick = 0;
+    // ── REAL Consensus for totals ──
+    let booksAgreeing = 0;
+    let booksTotal = 0;
     for (const odd of data.odds) {
-        if (odd.price <= medianPrice) booksSupportingPick++;
+      const probMap = bkFairProbs.get(odd.bkKey);
+      if (probMap && probMap[outcome] !== undefined) {
+        booksTotal++;
+        if (probMap[outcome] > 0.5) booksAgreeing++;
+      }
     }
-    const consensusStrength = data.odds.length > 0 ? booksSupportingPick / data.odds.length : 0;
-    
+    const consensusStrength = booksTotal > 0 ? booksAgreeing / booksTotal : 0;
+
+    // ── Sharp book alignment ──
+    let pinnacleAligns = false;
+    for (const odd of data.odds) {
+      if (SHARP_BOOK_KEYS.has(odd.bkKey)) {
+        const probMap = bkFairProbs.get(odd.bkKey);
+        if (probMap && (probMap[outcome] ?? 0) > 0.5) {
+          pinnacleAligns = true;
+          break;
+        }
+      }
+    }
+
     let bestOdds = 0;
     let bestBookmaker = 'N/A';
     if (validOddsItems.length > 0) {
@@ -322,6 +354,7 @@ function parseTotalsMarket(event: OddEvent): Map<string, ParsedMarketPick> {
       bestOdds,
       bookmakerCount: validOddsItems.length,
       consensusStrength,
+      pinnacleAligns,
       oddsArray,
       validOdds,
       bestBookmaker
@@ -379,6 +412,7 @@ export function extractValueBets(
           valuePercentage: value,
           kellyStake: calculateKellyCriterion(data.fairProb, data.bestOdds, 0.25),
           consensusStrength: data.consensusStrength,
+          pinnacleAligns: data.pinnacleAligns,
           sport: event.sport_key,
           league: event.sport_title,
           commenceTime: event.commence_time,
@@ -457,6 +491,7 @@ export function extractAllValueBets(
           valuePercentage: value,
           kellyStake: calculateKellyCriterion(data.fairProb, data.bestOdds, 0.25),
           consensusStrength: data.consensusStrength,
+          pinnacleAligns: data.pinnacleAligns,
           sport: event.sport_key,
           league: event.sport_title,
           commenceTime: event.commence_time,
@@ -516,6 +551,19 @@ export function getSmartPicks(
            market = 'Over/Under';
         }
 
+        // ── Multi-factor confidence: value% + bookmakers count + sharp book alignment ──
+        // Alta: value >= 5% Y (pinnacle align O 5+ books Y consensus > 0.7)
+        // Media: value >= 2% O (baja value pero pinnacle align con 3+ books)
+        // Baja: todo lo demás
+        let confidence: 'alta' | 'media' | 'baja';
+        if (value >= 5 && (data.pinnacleAligns || (data.bookmakerCount >= 5 && data.consensusStrength >= 0.7))) {
+          confidence = 'alta';
+        } else if (value >= 2 || (data.pinnacleAligns && data.bookmakerCount >= 3)) {
+          confidence = 'media';
+        } else {
+          confidence = 'baja';
+        }
+
         const candidatePick: SmartPick = {
           eventId: event.id,
           event: eventLabel,
@@ -531,9 +579,10 @@ export function getSmartPicks(
           valuePercentage: Math.max(0, value),
           kellyStake: calculateKellyCriterion(data.fairProb, data.bestOdds, 0.25),
           marketProbability: data.fairProb,
-          confidence: value >= 5 ? 'alta' : value >= 2 ? 'media' : 'baja',
+          confidence,
           bookmakerCount: data.bookmakerCount,
           consensusStrength: data.consensusStrength,
+          pinnacleAligns: data.pinnacleAligns,
           isFallback: false, // Will be set to true below if no value edge
         };
 

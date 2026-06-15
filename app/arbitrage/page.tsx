@@ -1,15 +1,10 @@
-import { createClient } from '@/lib/supabase/server';
-import { redirect } from 'next/navigation';
 import { getUpcomingMatches } from '@/lib/apis/odds-api';
 import { detectArbitrage } from '@/lib/algorithms/arbitrage-scanner';
 import LocalTime from '@/components/LocalTime';
 import { Percent, Info } from 'lucide-react';
 
 export default async function ArbitragePage() {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) redirect('/login');
-
+  // No auth required — arbitrage data is public
   const events = await getUpcomingMatches('upcoming');
   const arbs = detectArbitrage(events, 0.5);
 

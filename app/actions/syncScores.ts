@@ -1,6 +1,7 @@
 'use server';
 
 import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
 import { revalidatePath } from 'next/cache';
 
 /**
@@ -116,35 +117,42 @@ function didPickWin(
   const normHome = normalize(score.home_team);
   const normAway = normalize(score.away_team);
 
-  // Parse Over/Under (Totals) -> e.g. "Over 9.5", "Under 2.5", "Goles +1.5"
-  const isOver = /(over|mas|>|\+)/i.test(pick);
-  const isUnder = /(under|menos|<|-)/i.test(pick);
-  if (isOver || isUnder) {
-    const numMatch = pick.match(/[0-9.]+/);
+  // ── Totals / Over/Under ── (handles 'Over 2.5', 'Under 9.5', 'Goles +1.5', 'Carreras +8.5')
+  // Check market name first, then pick label
+  const isOverUnderMarket = /over.?under|totals|goles\s*[+\-]|carreras\s*[+\-]|puntos\s*[+\-]/i.test(market);
+  const isOverPick  = /(^|\s)(over|mas|más|\+)/i.test(pick);
+  const isUnderPick = /(^|\s)(under|menos)/i.test(pick);
+  
+  if (isOverUnderMarket || isOverPick || isUnderPick) {
+    const numMatch = pick.match(/([0-9]+(?:\.[0-9]+)?)/);
     if (numMatch) {
-      const line = parseFloat(numMatch[0]);
-      if (isOver) return totalScore > line;
-      if (isUnder) return totalScore < line;
+      const line = parseFloat(numMatch[1]);
+      if (isOverPick) return totalScore > line;
+      if (isUnderPick) return totalScore < line;
+      // If market says totals but pick label unclear, check if "over" is anywhere in pick
+      if (isOverUnderMarket) {
+        if (/over|más|\+/i.test(pick)) return totalScore > line;
+        if (/under|menos/i.test(pick)) return totalScore < line;
+      }
     }
+    return null; // can't determine without a line
   }
 
-  // Handle H2H / Ganador bets
+  // ── H2H / Ganador bets ──
   if (market === 'H2H' || market === 'Ganador' || !market || normPick.includes('gana')) {
-    if (normPick.includes(normHome) || normHome.includes(normPick)) {
+    if (normPick.includes(normHome) || normHome.includes(normPick.replace('gana ', '').trim())) {
       return homeScore > awScore;
     }
-    if (normPick.includes(normAway) || normAway.includes(normPick)) {
+    if (normPick.includes(normAway) || normAway.includes(normPick.replace('gana ', '').trim())) {
       return awScore > homeScore;
     }
   }
   
-  // Handle Draw / Empate
+  // ── Draw / Empate ──
   if (market === 'Empate' || normPick === 'draw' || normPick === 'empate') {
     return homeScore === awScore;
   }
 
-  // For totals markets (Over/Under), we can't reliably auto-grade
-  // without knowing the specific line. Return null = skip.
   return null;
 }
 
@@ -301,6 +309,116 @@ export async function syncScores(): Promise<{
     revalidatePath('/picks');
     revalidatePath('/dashboard');
     revalidatePath('/bankroll');
+  }
+
+  return { success: true, graded, won, lost, skipped };
+}
+
+/**
+ * Global Auto-Grader for Cron Jobs
+ * Uses Admin Client to grade all pending bets for all users.
+ */
+export async function syncAllPendingBets(): Promise<{
+  success: boolean;
+  graded: number;
+  won: number;
+  lost: number;
+  skipped: number;
+  error?: string;
+}> {
+  const supabase = createAdminClient();
+
+  // 1. Get ALL pending bets
+  const { data: pendingBets, error: betsError } = await supabase
+    .from('bets')
+    .select('*')
+    .eq('status', 'pending');
+
+  if (betsError) return { success: false, graded: 0, won: 0, lost: 0, skipped: 0, error: betsError.message };
+  if (!pendingBets || pendingBets.length === 0) {
+    return { success: true, graded: 0, won: 0, lost: 0, skipped: 0 };
+  }
+
+  const sportKeyMap: Record<string, string> = {
+    'soccer_fifa_world_cup': 'soccer_fifa_world_cup',
+    'basketball_nba': 'basketball_nba',
+    'baseball_mlb': 'baseball_mlb',
+    'soccer_epl': 'soccer_epl',
+    'soccer_spain_la_liga': 'soccer_spain_la_liga',
+    'soccer_uefa_champs_league': 'soccer_uefa_champs_league',
+    'soccer_france_ligue_one': 'soccer_france_ligue_one',
+    'soccer_italy_serie_a': 'soccer_italy_serie_a',
+    'soccer_germany_bundesliga': 'soccer_germany_bundesliga',
+    '⚽': 'soccer_fifa_world_cup',
+    '🏆': 'soccer_fifa_world_cup',
+    '🏀': 'basketball_nba',
+    '⚾': 'baseball_mlb',
+  };
+
+  const sportKeys = new Set<string>();
+  for (const bet of pendingBets) {
+    const key = sportKeyMap[bet.sport] || bet.sport;
+    if (key.includes('soccer') || key.includes('⚽') || key.includes('🏆')) {
+      sportKeys.add(sportKeyMap[bet.sport] || 'soccer_fifa_world_cup');
+    } else if (key.includes('basketball') || key.includes('🏀')) {
+      sportKeys.add('basketball_nba');
+    } else if (key.includes('baseball') || key.includes('⚾')) {
+      sportKeys.add('baseball_mlb');
+    } else {
+      sportKeys.add('soccer_fifa_world_cup');
+      sportKeys.add('basketball_nba');
+      sportKeys.add('baseball_mlb');
+    }
+  }
+
+  const allScores: ScoreEvent[] = [];
+  const scorePromises = Array.from(sportKeys).map(async (sportKey) => {
+    return await fetchScores(sportKey);
+  });
+  const results = await Promise.all(scorePromises);
+  results.forEach(r => allScores.push(...r));
+
+  let graded = 0;
+  let won = 0;
+  let lost = 0;
+  let skipped = 0;
+
+  // We need to group by user to update bankrolls efficiently
+  const userBankrollUpdates: Record<string, number> = {};
+
+  for (const bet of pendingBets) {
+    const matchedScore = matchBetToScore(bet.event, bet.match_time ?? null, allScores);
+    if (!matchedScore) { skipped++; continue; }
+
+    const result = didPickWin(bet.pick, matchedScore, bet.market);
+    if (result === null) { skipped++; continue; }
+
+    const stake = parseFloat(bet.stake);
+    const odds = parseFloat(bet.odds);
+    const status = result ? 'won' : 'lost';
+    const profit = result ? parseFloat(((stake * odds) - stake).toFixed(2)) : -stake;
+
+    await supabase.from('bets').update({ status, profit }).eq('id', bet.id);
+
+    if (result) {
+      userBankrollUpdates[bet.user_id] = (userBankrollUpdates[bet.user_id] || 0) + stake + Math.abs(profit);
+      won++;
+    } else {
+      lost++;
+    }
+    graded++;
+  }
+
+  // Update bankrolls
+  for (const [userId, amountToAdd] of Object.entries(userBankrollUpdates)) {
+    if (amountToAdd > 0) {
+      const { data: profile } = await supabase.from('profiles').select('bankroll_actual').eq('id', userId).single();
+      if (profile) {
+        await supabase.from('profiles').update({ 
+          bankroll_actual: parseFloat(profile.bankroll_actual) + amountToAdd 
+        }).eq('id', userId);
+      }
+    }
   }
 
   return { success: true, graded, won, lost, skipped };

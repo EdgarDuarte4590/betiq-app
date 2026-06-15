@@ -40,7 +40,17 @@ export default function GlobalBetModal() {
       setMatch(draftBet.match);
       setOdds(draftBet.odds);
       setStake(draftBet.stake);
-      setMarket('H2H');
+      // Derive market from pick label so Over/Under bets are categorized correctly
+      const pick = (draftBet.pick || '').toLowerCase();
+      if (pick.includes('over') || pick.includes('under') || /[0-9]+\.[0-9]+/.test(pick)) {
+        setMarket('Over/Under');
+      } else if (pick === 'empate' || pick === 'draw') {
+        setMarket('Empate');
+      } else if (draftBet.market) {
+        setMarket(draftBet.market);
+      } else {
+        setMarket('H2H');
+      }
     } else {
       setMatch('');
       setOdds('2.00');
@@ -162,16 +172,45 @@ export default function GlobalBetModal() {
           }}>
             {/* Header */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
-              <h3 style={{ fontSize: '1.1rem', fontWeight: 700 }}>Registrar Apuesta</h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                {draftBet?.sport && <span style={{ fontSize: '1.3rem' }}>{draftBet.sport}</span>}
+                <div>
+                  <h3 style={{ fontSize: '1rem', fontWeight: 700, lineHeight: 1 }}>Registrar Apuesta</h3>
+                  {draftBet?.league && (
+                    <div style={{ fontSize: '0.68rem', color: 'var(--foreground-muted)', marginTop: 2 }}>{draftBet.league}</div>
+                  )}
+                </div>
+              </div>
               <button onClick={closeModal} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--foreground-muted)', padding: 4 }}>
                 <X size={20} />
               </button>
             </div>
 
-            {/* Draft pick tag */}
+            {/* Draft pick summary */}
             {draftBet?.pick && (
-              <div style={{ marginBottom: '1.25rem', padding: '0.6rem 0.875rem', background: 'rgba(255,215,0,0.08)', borderRadius: 8, fontSize: '0.82rem', color: 'var(--accent-gold)', border: '1px solid rgba(255,215,0,0.2)' }}>
-                ⭐ Pick sugerido: <strong>{draftBet.pick}</strong>
+              <div style={{
+                marginBottom: '1.25rem',
+                padding: '0.75rem 1rem',
+                background: 'linear-gradient(135deg, rgba(255,215,0,0.06), rgba(0,214,143,0.04))',
+                borderRadius: 10,
+                border: '1px solid rgba(255,215,0,0.18)',
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                  <div>
+                    <div style={{ fontSize: '0.68rem', color: 'var(--foreground-muted)', marginBottom: 3 }}>Pick sugerido por BetIQ</div>
+                    <div style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--accent-gold)' }}>⭐ {draftBet.pick}</div>
+                  </div>
+                  {draftBet.confidence && (
+                    <span style={{
+                      padding: '2px 9px', borderRadius: 99,
+                      background: draftBet.confidence === 'alta' ? 'rgba(0,214,143,0.15)' : draftBet.confidence === 'media' ? 'rgba(255,215,0,0.15)' : 'rgba(148,163,184,0.12)',
+                      color: draftBet.confidence === 'alta' ? 'var(--accent-green)' : draftBet.confidence === 'media' ? 'var(--accent-gold)' : '#94a3b8',
+                      fontSize: '0.65rem', fontWeight: 700,
+                    }}>
+                      {draftBet.confidence === 'alta' ? '🔥 Alta' : draftBet.confidence === 'media' ? '⚡ Media' : '📊 Baja'} confianza
+                    </span>
+                  )}
+                </div>
               </div>
             )}
 

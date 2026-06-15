@@ -35,12 +35,12 @@ export async function updateSession(request: NextRequest) {
   const isAuthPage = request.nextUrl.pathname.startsWith('/login') || 
                      request.nextUrl.pathname.startsWith('/register')
 
-  if (!user && !isAuthPage && request.nextUrl.pathname !== '/') {
-    // Si no hay usuario y no está en login/página inicial, redirigir a login
-    const url = request.nextUrl.clone()
-    url.pathname = '/login'
-    return NextResponse.redirect(url)
-  }
+  // ── AUTH GATES (comentado temporalmente para desarrollo/demo) ──
+  // if (!user && !isAuthPage && request.nextUrl.pathname !== '/') {
+  //   const url = request.nextUrl.clone()
+  //   url.pathname = '/login'
+  //   return NextResponse.redirect(url)
+  // }
 
   if (user && isAuthPage) {
     // Si ya está logueado y trata de ir a login, mandarlo al dashboard

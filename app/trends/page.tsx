@@ -1,5 +1,4 @@
 import { createClient } from '@/lib/supabase/server';
-import { redirect } from 'next/navigation';
 import { TrendingUp, BarChart2, Trophy, Target, DollarSign, Activity, Compass } from 'lucide-react';
 import { calculateBettingStats } from '@/lib/algorithms/value-bet-calculator';
 import LineChart from '@/components/ui/LineChart';
@@ -7,13 +6,13 @@ import LineChart from '@/components/ui/LineChart';
 export default async function TrendsPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) redirect('/login');
+  // if (!user) redirect('/login'); // Temporalmente deshabilitado
 
-  const { data: bets = [] } = await supabase
+  const { data: bets = [] } = user ? await supabase
     .from('bets')
     .select('*')
     .eq('user_id', user.id)
-    .order('created_at', { ascending: true });
+    .order('created_at', { ascending: true }) : { data: [] };
 
   const allBets = bets ?? [];
   const closedBets = allBets.filter(b => b.status === 'won' || b.status === 'lost');

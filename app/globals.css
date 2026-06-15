@@ -187,6 +187,32 @@ body {
   border-color: var(--accent-green) !important;
 }
 
+/* Pick card hover */
+.pick-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  border-color: rgba(0, 214, 143, 0.3) !important;
+}
+
+/* Value bet table row hover */
+.value-bet-row:hover {
+  background: rgba(255, 255, 255, 0.03) !important;
+}
+
+/* Stat card entry animation */
+.stat-card {
+  animation: fadeInUp 0.35s ease both;
+}
+.stat-card:nth-child(1) { animation-delay: 0ms; }
+.stat-card:nth-child(2) { animation-delay: 60ms; }
+.stat-card:nth-child(3) { animation-delay: 120ms; }
+.stat-card:nth-child(4) { animation-delay: 180ms; }
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 /* Table row hover */
 .data-table-row:hover td {
   background: rgba(255,255,255,0.03);
