@@ -118,6 +118,7 @@ export interface SmartPick {
   consensusStrength: number; // 0-1: fracción de libros que coinciden en el pick
   pinnacleAligns: boolean;   // true si sharp books respaldan el pick
   isFallback: boolean;       // true = no tiene value edge real, solo la mejor opción disponible
+  isRecommended: boolean;    // true = cumple criterios estrictos (zonas/value) para notificación
 }
 
 // ========== DEPORTES PRINCIPALES ==========
@@ -650,9 +651,9 @@ export function getSmartPicks(
           marketProbability: data.fairProb,
           confidence,
           bookmakerCount: data.bookmakerCount,
-          consensusStrength: data.consensusStrength,
           pinnacleAligns: data.pinnacleAligns,
           isFallback: false, // Will be set to true below if no value edge
+          isRecommended: false, // Will be set later
         };
 
         if (value > 0) {
@@ -696,12 +697,17 @@ export function getSmartPicks(
     }
   }
 
-  // Filtrar por sistema de zonas y ordenar
-  const acceptablePicks = picks.filter(p =>
-    isOddsAcceptable(p.bestOdds, p.valuePercentage, p.pinnacleAligns)
-  );
+  }
 
-  return acceptablePicks.sort((a, b) => {
+  // Marcar picks recomendados (los que pasan el estricto filtro de zonas/value)
+  for (const p of picks) {
+    p.isRecommended = isOddsAcceptable(p.bestOdds, p.valuePercentage, p.pinnacleAligns);
+  }
+
+  return picks.sort((a, b) => {
+    // 0. Recomendados primero
+    if (a.isRecommended && !b.isRecommended) return -1;
+    if (b.isRecommended && !a.isRecommended) return 1;
     // 1. Picks con value real antes que fallbacks
     if (a.valuePercentage > 0 && b.valuePercentage <= 0) return -1;
     if (b.valuePercentage > 0 && a.valuePercentage <= 0) return 1;
@@ -758,16 +764,16 @@ export function getTopDailyPicks(
   // Obtener todos los smart picks con el filtro de zonas ya aplicado
   const allPicks = getSmartPicks(events, true);
 
-  // Separar por calidad
+  // Separar por calidad (Solo de los recomendados)
   const highQuality = allPicks.filter(p =>
-    p.valuePercentage > 0 &&
+    p.isRecommended && p.valuePercentage > 0 &&
     (requireHighConfidence
       ? p.confidence === 'alta'
       : p.confidence === 'alta' || p.confidence === 'media')
   );
 
   const lowQuality = allPicks.filter(p =>
-    !highQuality.includes(p) && p.valuePercentage > 0
+    p.isRecommended && !highQuality.includes(p) && p.valuePercentage > 0
   );
 
   // Ordenar cada grupo por score ponderado

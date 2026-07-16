@@ -96,7 +96,7 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
       }}
     >
       {/* Accent line on left for high confidence */}
-      {pick.confidence === 'alta' && !pick.isFallback && (
+      {pick.confidence === 'alta' && pick.isRecommended && (
         <div style={{
           position: 'absolute', left: 0, top: 0, bottom: 0, width: 3,
           background: 'linear-gradient(180deg, var(--accent-green), var(--accent-gold))',
@@ -105,21 +105,21 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
       )}
 
       {/* Top row: sport + league + time + badge */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 8, flexWrap: 'wrap', paddingLeft: pick.confidence === 'alta' && !pick.isFallback ? 6 : 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 8, flexWrap: 'wrap', paddingLeft: pick.confidence === 'alta' && pick.isRecommended ? 6 : 0 }}>
         <span style={{ fontSize: '1rem' }}>{icon}</span>
         <span style={{ fontSize: '0.70rem', color: 'var(--foreground-muted)', fontWeight: 500 }}>{pick.league}</span>
         <span style={{ fontSize: '0.65rem', color: 'var(--foreground-subtle)' }}>
           · <LocalTime isoString={pick.commenceTime} format="datetime" />
         </span>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5 }}>
-          {pick.pinnacleAligns && !pick.isFallback && (
+          {pick.pinnacleAligns && pick.isRecommended && (
             <span title="Sharp books respaldan este pick" style={{
               padding: '1px 6px', borderRadius: 99,
               background: 'rgba(59,130,246,0.15)', color: 'var(--accent-blue)',
               fontSize: '0.6rem', fontWeight: 700,
             }}>📌 SHARP</span>
           )}
-          {!pick.isFallback && !isLive && (
+          {pick.isRecommended && !isLive && (
             <span style={{
               padding: '2px 9px', borderRadius: 99,
               background: conf.bg, color: conf.color,
@@ -127,17 +127,6 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
               border: `1px solid ${conf.border}`,
             }}>
               {conf.label}
-            </span>
-          )}
-          {pick.isFallback && !isLive && (
-            <span title="Sin edge matemático detectado. Monitorear." style={{
-              padding: '2px 9px', borderRadius: 99,
-              background: 'rgba(100,116,139,0.12)', color: '#64748b',
-              fontSize: '0.65rem', fontWeight: 600,
-              border: '1px solid rgba(100,116,139,0.2)',
-            }}>
-              <Eye size={9} style={{ display: 'inline', marginRight: 3 }} />
-              Sin edge · Monitorear
             </span>
           )}
           {isLive && (
@@ -151,13 +140,25 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
               🔴 EN JUEGO
             </span>
           )}
+          {!pick.isRecommended && !isLive && (
+            <span title="Este partido no cumple los criterios estrictos del sistema. Se muestra de forma informativa." style={{
+              padding: '2px 9px', borderRadius: 99,
+              background: 'rgba(255,255,255,0.05)', color: 'var(--foreground-muted)',
+              fontSize: '0.65rem', fontWeight: 600,
+              border: '1px dashed var(--border-subtle)',
+            }}>
+              <Eye size={9} style={{ display: 'inline', marginRight: 3 }} />
+              Solo Informativo
+            </span>
+          )}
         </div>
       </div>
 
       {/* Match name */}
       <div style={{
         fontWeight: 700, fontSize: '0.92rem', marginBottom: 8,
-        paddingLeft: pick.confidence === 'alta' && !pick.isFallback ? 6 : 0,
+        paddingLeft: pick.confidence === 'alta' && pick.isRecommended ? 6 : 0,
+        opacity: pick.isRecommended ? 1 : 0.8,
       }}>
         {pick.event}
       </div>
@@ -165,9 +166,9 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
       {/* Pick recommendation + odds */}
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
-        paddingLeft: pick.confidence === 'alta' && !pick.isFallback ? 6 : 0,
+        paddingLeft: pick.confidence === 'alta' && pick.isRecommended ? 6 : 0,
       }}>
-        <div>
+        <div style={{ opacity: pick.isRecommended ? 1 : 0.7 }}>
           <div style={{
             fontSize: '0.85rem',
             color: pick.isFallback ? 'var(--foreground-muted)' : 'var(--accent-green)',
@@ -238,14 +239,14 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
       )}
 
       {/* Fallback explanation */}
-      {pick.isFallback && (
+      {!pick.isRecommended && (
         <div style={{
           marginTop: 8, fontSize: '0.68rem',
           color: 'var(--foreground-subtle)',
           fontStyle: 'italic',
           paddingLeft: 4,
         }}>
-          ⚠ Sin ventaja matemática detectada en este partido. Solo se muestra como referencia.
+          ⚠ No cumple criterios del sistema. Mostrar por completitud.
         </div>
       )}
     </div>
