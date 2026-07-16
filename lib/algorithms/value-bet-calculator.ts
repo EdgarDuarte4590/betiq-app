@@ -651,6 +651,7 @@ export function getSmartPicks(
           marketProbability: data.fairProb,
           confidence,
           bookmakerCount: data.bookmakerCount,
+          consensusStrength: data.consensusStrength,
           pinnacleAligns: data.pinnacleAligns,
           isFallback: false, // Will be set to true below if no value edge
           isRecommended: false, // Will be set later
@@ -696,9 +697,6 @@ export function getSmartPicks(
       picks.push(bp);
     }
   }
-
-  }
-
   // Marcar picks recomendados (los que pasan el estricto filtro de zonas/value)
   for (const p of picks) {
     p.isRecommended = isOddsAcceptable(p.bestOdds, p.valuePercentage, p.pinnacleAligns);
