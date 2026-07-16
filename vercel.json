@@ -2,11 +2,15 @@
   "crons": [
     {
       "path": "/api/cron/refresh-odds",
-      "schedule": "0 0 * * *"
+      "schedule": "0 */6 * * *"
     },
     {
       "path": "/api/cron/sync-scores",
-      "schedule": "0 0 * * *"
+      "schedule": "0 */3 * * *"
+    },
+    {
+      "path": "/api/cron/send-picks",
+      "schedule": "0 15 * * *"
     }
   ]
 }

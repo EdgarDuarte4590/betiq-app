@@ -3,6 +3,7 @@
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { revalidatePath } from 'next/cache';
+import { getActiveKey, recordKeyUsage, markKeyExhausted } from '@/lib/apis/key-manager';
 
 /**
  * Scores API response types from The Odds API
@@ -25,15 +26,29 @@ interface ScoreEvent {
  * We only call for leagues where the user has pending bets.
  */
 async function fetchScores(sportKey: string): Promise<ScoreEvent[]> {
-  const API_KEY = process.env.THE_ODDS_API_KEY;
-  if (!API_KEY) return [];
+  // Obtener la key activa del pool de rotación
+  const API_KEY = await getActiveKey();
+  if (!API_KEY) {
+    console.error('[syncScores] No hay API keys disponibles para fetchScores');
+    return [];
+  }
 
   try {
     const res = await fetch(
       `https://api.the-odds-api.com/v4/sports/${sportKey}/scores/?apiKey=${API_KEY}&daysFrom=3`,
       { cache: 'no-store' } // Always fresh data for grading
     );
-    if (!res.ok) return [];
+
+    // Registrar uso de la key
+    await recordKeyUsage(API_KEY, res.headers);
+
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 429) {
+        await markKeyExhausted(API_KEY);
+        console.warn(`[syncScores] Key agotada (${res.status}), marcada para rotación`);
+      }
+      return [];
+    }
     return await res.json();
   } catch {
     return [];

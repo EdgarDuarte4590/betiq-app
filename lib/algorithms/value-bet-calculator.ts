@@ -1,11 +1,15 @@
 /**
- * BetIQ Value Bet Calculator v3
- * 
+ * BetIQ Value Bet Calculator v3.1
+ *
  * Motor profesional de análisis multi-bookmaker.
+ * - Sistema de ZONAS DE CUOTAS con prioridad inteligente:
+ *     Zona A (primaria)  : 1.50–1.95 → siempre prioridad máxima
+ *     Zona B (secundaria): 1.96–2.50 → solo si value% >= SECONDARY_VALUE_THRESHOLD
+ *     Zona C (alto valor): >2.50     → solo si value% >= HIGH_VALUE_THRESHOLD Y pinnacleAligns
+ * - Limite diario configurable: 5–10 picks de alta calidad (getTopDailyPicks)
  * - Consolida resultados: UNA recomendación por partido/pick (no repetidas por casa)
  * - Muestra rango de cuotas (min–max) en vez de una por bookmaker
  * - Soporta: H2H (1X2 + Empate), Totals (Over/Under)
- * - Cuotas filtradas: 1.50–5.00, prioridad 1.50–2.00
  */
 
 import type { OddEvent } from '@/lib/apis/odds-api';
@@ -142,8 +146,65 @@ interface ParsedMarketPick {
 // Sharp books used for consensus validation
 const SHARP_BOOK_KEYS = new Set(['pinnacle', 'betfair_ex_eu', 'betfair_ex_uk', 'bookmaker']);
 
-const MIN_ODDS = 1.50;
-const MAX_ODDS = 5.00;
+// ========== SISTEMA DE ZONAS DE CUOTAS ==========
+// Zona A (primaria)  : cuotas realistas con alta probabilidad implícita
+// Zona B (secundaria): visibles solo con value estadístico real
+// Zona C (alto valor): visibles solo con respaldo de sharp books
+const ODDS_ZONE_A_MIN = 1.50;
+const ODDS_ZONE_A_MAX = 1.95;
+const ODDS_ZONE_B_MAX = 2.50;
+const ODDS_ZONE_C_MAX = 5.00;
+
+// Thresholds de value% para cuotas fuera de la zona primaria
+const SECONDARY_VALUE_THRESHOLD = 5.0;  // Zona B: necesita al menos +5% de value
+const HIGH_VALUE_THRESHOLD      = 10.0; // Zona C: necesita al menos +10% de value + pinnacle
+
+/** Verifica si una cuota está en la zona primaria (1.50–1.95) */
+export function isOddsZoneA(odds: number): boolean {
+  return odds >= ODDS_ZONE_A_MIN && odds <= ODDS_ZONE_A_MAX;
+}
+
+/** Verifica si una cuota está en zona secundaria (1.96–2.50) */
+export function isOddsZoneB(odds: number): boolean {
+  return odds > ODDS_ZONE_A_MAX && odds <= ODDS_ZONE_B_MAX;
+}
+
+/** Verifica si una cuota está en zona alta (>2.50) */
+export function isOddsZoneC(odds: number): boolean {
+  return odds > ODDS_ZONE_B_MAX && odds <= ODDS_ZONE_C_MAX;
+}
+
+/**
+ * Determina si una cuota es válida para mostrar dado el value y el respaldo de sharp books.
+ * - Zona A (1.50–1.95): siempre válida si supera el minValue del caller
+ * - Zona B (1.96–2.50): válida si value% >= SECONDARY_VALUE_THRESHOLD
+ * - Zona C (>2.50)    : válida si value% >= HIGH_VALUE_THRESHOLD Y pinnacleAligns
+ */
+export function isOddsAcceptable(
+  odds: number,
+  valuePercentage: number,
+  pinnacleAligns: boolean
+): boolean {
+  if (odds < ODDS_ZONE_A_MIN || odds > ODDS_ZONE_C_MAX) return false;
+  if (isOddsZoneA(odds)) return true;
+  if (isOddsZoneB(odds)) return valuePercentage >= SECONDARY_VALUE_THRESHOLD;
+  if (isOddsZoneC(odds)) return valuePercentage >= HIGH_VALUE_THRESHOLD && pinnacleAligns;
+  return false;
+}
+
+/**
+ * Calcula la zona de una cuota como número (1=A, 2=B, 3=C).
+ * Usado para el sorting: zona A siempre tiene prioridad.
+ */
+export function getOddsZone(odds: number): 1 | 2 | 3 {
+  if (isOddsZoneA(odds)) return 1;
+  if (isOddsZoneB(odds)) return 2;
+  return 3;
+}
+
+// Alias interno para validación de rango mínimo (compatibilidad con helpers)
+const MIN_ODDS = ODDS_ZONE_A_MIN;
+const MAX_ODDS = ODDS_ZONE_C_MAX;
 
 function parseH2HMarket(event: OddEvent): Map<string, ParsedMarketPick> {
   const bkFairProbs = new Map<string, Record<string, number>>();
@@ -433,11 +494,16 @@ export function extractValueBets(
     }
   }
 
-  // Ordenar: prioridad cuotas 1.50–2.00, luego por valor descendente
-  return Array.from(bestPerEvent.values()).sort((a, b) => {
-    const aPriority = a.oddsBest <= 2.00 ? 1 : 0;
-    const bPriority = b.oddsBest <= 2.00 ? 1 : 0;
-    if (aPriority !== bPriority) return bPriority - aPriority;
+  // Filtrar: solo cuotas aceptables según el sistema de zonas
+  const filtered = Array.from(bestPerEvent.values()).filter(op =>
+    isOddsAcceptable(op.oddsBest, op.valuePercentage, op.pinnacleAligns)
+  );
+
+  // Ordenar: Zona A primero, luego Zona B, luego Zona C; dentro de cada zona por value%
+  return filtered.sort((a, b) => {
+    const zoneA = getOddsZone(a.oddsBest);
+    const zoneB = getOddsZone(b.oddsBest);
+    if (zoneA !== zoneB) return zoneA - zoneB; // Zona A (1) antes que B (2) antes que C (3)
     return b.valuePercentage - a.valuePercentage;
   });
 }
@@ -503,12 +569,15 @@ export function extractAllValueBets(
     processMap(totalsMap, false);
   }
 
-  return opportunities.sort((a, b) => {
-    const aPriority = a.oddsBest <= 2.00 ? 1 : 0;
-    const bPriority = b.oddsBest <= 2.00 ? 1 : 0;
-    if (aPriority !== bPriority) return bPriority - aPriority;
-    return b.valuePercentage - a.valuePercentage;
-  });
+  // Filtrar por zonas aceptables y ordenar
+  return opportunities
+    .filter(op => isOddsAcceptable(op.oddsBest, op.valuePercentage, op.pinnacleAligns))
+    .sort((a, b) => {
+      const zoneA = getOddsZone(a.oddsBest);
+      const zoneB = getOddsZone(b.oddsBest);
+      if (zoneA !== zoneB) return zoneA - zoneB;
+      return b.valuePercentage - a.valuePercentage;
+    });
 }
 
 // ========== ANÁLISIS DE MEJOR PICK POR PARTIDO ==========
@@ -627,12 +696,94 @@ export function getSmartPicks(
     }
   }
 
-  // Ordenar: primero los que tienen valor real, luego por valor descendente
-  return picks.sort((a, b) => {
+  // Filtrar por sistema de zonas y ordenar
+  const acceptablePicks = picks.filter(p =>
+    isOddsAcceptable(p.bestOdds, p.valuePercentage, p.pinnacleAligns)
+  );
+
+  return acceptablePicks.sort((a, b) => {
+    // 1. Picks con value real antes que fallbacks
     if (a.valuePercentage > 0 && b.valuePercentage <= 0) return -1;
     if (b.valuePercentage > 0 && a.valuePercentage <= 0) return 1;
+    // 2. Zona A antes que B antes que C
+    const zoneA = getOddsZone(a.bestOdds);
+    const zoneB = getOddsZone(b.bestOdds);
+    if (zoneA !== zoneB) return zoneA - zoneB;
+    // 3. Dentro de la misma zona, por value%
     return b.valuePercentage - a.valuePercentage;
   });
+}
+
+// ========== PICKS DIARIOS CON FILTRO DE CALIDAD ==========
+
+export interface DailyPicksConfig {
+  minPicks?: number;  // Mínimo de picks a mostrar (default: 5)
+  maxPicks?: number;  // Máximo de picks a mostrar (default: 10)
+  requireHighConfidence?: boolean; // Si true, solo 'alta'. Default: false (alta + media)
+}
+
+/**
+ * Calcula un score ponderado para rankear picks diarios.
+ * Combina: value%, consenso, respaldo de sharp books y zona de cuotas.
+ */
+function calculatePickScore(pick: SmartPick): number {
+  const valueScore      = Math.min(pick.valuePercentage, 20) * 2;     // 0–40 pts
+  const consensusScore  = pick.consensusStrength * 20;                 // 0–20 pts
+  const pinnacleBonus   = pick.pinnacleAligns ? 15 : 0;               // 0–15 pts
+  const confidenceBonus = pick.confidence === 'alta' ? 20
+                        : pick.confidence === 'media' ? 10 : 0;       // 0–20 pts
+  const zoneBonus       = isOddsZoneA(pick.bestOdds) ? 5 : 0;        // +5 si está en zona primaria
+  return valueScore + consensusScore + pinnacleBonus + confidenceBonus + zoneBonus;
+}
+
+/**
+ * Filtra y limita los smart picks a un rango de 5–10 picks de alta calidad.
+ * 
+ * Lógica:
+ * 1. Descarta picks sin value real (isFallback) si hay suficientes con value positivo
+ * 2. Ordena por score ponderado (value + consenso + sharp books + zona)
+ * 3. Aplica límite de maxPicks
+ * 4. Si no hay suficientes de confianza alta/media, incluye 'baja' hasta alcanzar minPicks
+ */
+export function getTopDailyPicks(
+  events: OddEvent[],
+  config: DailyPicksConfig = {}
+): SmartPick[] {
+  const {
+    minPicks = 5,
+    maxPicks = 10,
+    requireHighConfidence = false,
+  } = config;
+
+  // Obtener todos los smart picks con el filtro de zonas ya aplicado
+  const allPicks = getSmartPicks(events, true);
+
+  // Separar por calidad
+  const highQuality = allPicks.filter(p =>
+    p.valuePercentage > 0 &&
+    (requireHighConfidence
+      ? p.confidence === 'alta'
+      : p.confidence === 'alta' || p.confidence === 'media')
+  );
+
+  const lowQuality = allPicks.filter(p =>
+    !highQuality.includes(p) && p.valuePercentage > 0
+  );
+
+  // Ordenar cada grupo por score ponderado
+  const sortedHigh = highQuality.sort((a, b) => calculatePickScore(b) - calculatePickScore(a));
+  const sortedLow  = lowQuality.sort((a, b) => calculatePickScore(b) - calculatePickScore(a));
+
+  // Tomar hasta maxPicks de alta calidad
+  let result = sortedHigh.slice(0, maxPicks);
+
+  // Si quedamos por debajo del mínimo, completar con picks de calidad baja
+  if (result.length < minPicks) {
+    const needed = minPicks - result.length;
+    result = [...result, ...sortedLow.slice(0, needed)];
+  }
+
+  return result;
 }
 
 // ========== STATS ==========

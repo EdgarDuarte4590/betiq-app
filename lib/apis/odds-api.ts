@@ -1,4 +1,5 @@
 // Dynamic imports are used inside functions to prevent "Module not found: fs" in Client Components
+import { getActiveKey, recordKeyUsage, markKeyExhausted } from '@/lib/apis/key-manager';
 
 export interface OddEvent {
   id: string;
@@ -27,18 +28,80 @@ export interface Outcome {
   price: number;
 }
 
+// ========== CALENDARIO DINÁMICO DE LIGAS ==========
+
+interface SportSchedule {
+  key: string;          // sport_key de The Odds API
+  label: string;        // Nombre legible
+  activeFrom?: string;  // ISO date YYYY-MM-DD — null = activa desde siempre
+  activeUntil?: string; // ISO date YYYY-MM-DD — null = sin fecha de fin
+}
+
+/**
+ * Calendario oficial de competiciones.
+ * Actualizar las fechas cuando comiencen nuevas temporadas.
+ * El sistema filtra automáticamente cuáles están activas hoy.
+ */
+export const SPORT_SCHEDULE: SportSchedule[] = [
+  // ── Fútbol: Copa del Mundo 2026 ──
+  { key: 'soccer_fifa_world_cup',      label: '🏆 Copa del Mundo 2026',       activeUntil: '2026-07-19' },
+  // ── Béisbol ──
+  { key: 'baseball_mlb',               label: '⚾ MLB Temporada Regular',      activeFrom: '2026-03-20', activeUntil: '2026-10-31' },
+  // ── Baloncesto ──
+  { key: 'basketball_nba',             label: '🏀 NBA Temporada Regular',      activeFrom: '2026-10-01', activeUntil: '2027-06-30' },
+  { key: 'basketball_wnba',            label: '🏀 WNBA',                       activeFrom: '2026-05-15', activeUntil: '2026-10-15' },
+  // ── Fútbol: Ligas América ──
+  { key: 'soccer_usa_mls',             label: '⚽ MLS',                        activeFrom: '2026-02-20', activeUntil: '2026-12-15' },
+  { key: 'soccer_brazil_campeonato',   label: '⚽ Brasileirão',                activeFrom: '2026-04-01', activeUntil: '2026-12-07' },
+  { key: 'soccer_argentina_primera',   label: '⚽ Liga Argentina',             activeFrom: '2026-02-01', activeUntil: '2026-12-20' },
+  // ── Fútbol: Top 5 Ligas Europeas (temporada 2026-27) ──
+  { key: 'soccer_epl',                 label: '⚽ Premier League',             activeFrom: '2026-08-08' },
+  { key: 'soccer_spain_la_liga',       label: '⚽ La Liga',                    activeFrom: '2026-08-15' },
+  { key: 'soccer_germany_bundesliga',  label: '⚽ Bundesliga',                 activeFrom: '2026-08-14' },
+  { key: 'soccer_italy_serie_a',       label: '⚽ Serie A',                    activeFrom: '2026-08-22' },
+  { key: 'soccer_france_ligue_one',    label: '⚽ Ligue 1',                    activeFrom: '2026-08-08' },
+  // ── Champions League ──
+  { key: 'soccer_uefa_champs_league',  label: '⚽ UEFA Champions League',      activeFrom: '2026-07-08' },
+];
+
+/**
+ * Retorna los sport_keys que están activos en la fecha actual.
+ * Compara con activeFrom y activeUntil del calendario.
+ */
+export function getActiveSports(referenceDate?: Date): string[] {
+  const now = referenceDate ?? new Date();
+  const today = now.toISOString().split('T')[0]; // YYYY-MM-DD
+
+  return SPORT_SCHEDULE
+    .filter(sport => {
+      const fromOk  = !sport.activeFrom  || today >= sport.activeFrom;
+      const untilOk = !sport.activeUntil || today <= sport.activeUntil;
+      return fromOk && untilOk;
+    })
+    .map(sport => sport.key);
+}
+
+/**
+ * Retorna todos los sports del calendario con su estado (activo/inactivo).
+ * Útil para mostrar el estado en el dashboard.
+ */
+export function getScheduleStatus(referenceDate?: Date): Array<SportSchedule & { isActive: boolean }> {
+  const activeKeys = new Set(getActiveSports(referenceDate));
+  return SPORT_SCHEDULE.map(sport => ({
+    ...sport,
+    isActive: activeKeys.has(sport.key),
+  }));
+}
+
 /**
  * Obtiene los próximos partidos con sus cuotas de múltiples bookmakers.
- * Usa ISR de Next.js (revalidate: 3600) para cachear la respuesta 1 hora
+ * Usa ISR de Next.js (revalidate: 21600) para cachear la respuesta 6 horas
  * y conservar las 500 requests/mes gratuitas.
+ * 
+ * Cuando sport === 'upcoming', consulta automáticamente todos los sports
+ * activos según el calendario de competiciones (SPORT_SCHEDULE).
  */
 export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<OddEvent[]> {
-  const API_KEY = process.env.THE_ODDS_API_KEY;
-  if (!API_KEY) {
-    console.warn('[OddsAPI] Falta THE_ODDS_API_KEY en .env.local');
-    return [];
-  }
-
   // MOCK SYSTEM para entorno de Desarrollo (Evita consumir peticiones reales de la API)
   if (process.env.NODE_ENV === 'development') {
     try {
@@ -55,14 +118,25 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
     }
   }
 
-  // 3 deportes × 4 peticiones al día (cada 6h) = 12 peticiones/día = 360/mes (Plan free: 500/mes)
-  let targetSports = [sport];
+  // Obtener la key activa del pool de rotación
+  const API_KEY = await getActiveKey();
+  if (!API_KEY) {
+    console.error('[OddsAPI] 🚫 No hay API keys disponibles. Todas agotadas o no configuradas.');
+    return [];
+  }
+
+  // Determinar qué sports consultar
+  let targetSports: string[];
   if (sport === 'upcoming') {
-    targetSports = [
-      'soccer_fifa_world_cup',    // ⚽ Mundial 2026 (USA/México/Canadá)
-      'basketball_nba',           // 🏀 Finales NBA
-      'baseball_mlb',             // ⚾ Temporada regular MLB
-    ];
+    // Usar el calendario dinámico: solo sports activos hoy
+    targetSports = getActiveSports();
+    if (targetSports.length === 0) {
+      console.warn('[OddsAPI] ⚠️ No hay sports activos en el calendario hoy. Verifica SPORT_SCHEDULE.');
+      return [];
+    }
+    console.log(`[OddsAPI] 📅 Sports activos hoy (${new Date().toISOString().split('T')[0]}): ${targetSports.join(', ')}`);
+  } else {
+    targetSports = [sport];
   }
 
   try {
@@ -70,15 +144,26 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 15000);
       const url = `https://api.the-odds-api.com/v4/sports/${s}/odds?apiKey=${API_KEY}&regions=eu,us,uk,au&markets=h2h,totals&oddsFormat=decimal`;
-      
+
       const response = await fetch(url, {
         signal: controller.signal,
-        next: { revalidate: 21600 }, // 6 horas (3 sports × 4/día = 12/día = 360/mes)
+        next: { revalidate: 21600 }, // 6 horas
       });
       clearTimeout(timeoutId);
 
+      // Registrar uso de la key con los headers exactos de la respuesta
+      await recordKeyUsage(API_KEY, response.headers);
+
       if (!response.ok) {
-        console.error(`[OddsAPI] Falla al obtener ${s}. Código: ${response.status}. Utilizados: ${response.headers.get('x-requests-used')}, Restantes: ${response.headers.get('x-requests-remaining')}`);
+        const used      = response.headers.get('x-requests-used');
+        const remaining = response.headers.get('x-requests-remaining');
+        console.error(`[OddsAPI] Falla al obtener ${s}. Código: ${response.status}. Usados: ${used}, Restantes: ${remaining}`);
+
+        // Si es error de autenticación o rate limit, marcar key como agotada
+        if (response.status === 401 || response.status === 429) {
+          await markKeyExhausted(API_KEY);
+          console.warn(`[OddsAPI] ⚠️ Key marcada como agotada por error ${response.status}. El próximo cron usará la siguiente key.`);
+        }
         return [];
       }
       return await response.json();
