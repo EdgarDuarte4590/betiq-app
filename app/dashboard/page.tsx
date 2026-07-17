@@ -2,7 +2,7 @@ import { createClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
 import { Zap, DollarSign, Target, TrendingUp, Activity, Clock } from 'lucide-react';
 import { getUpcomingMatches, categorizeEventsByTime } from '@/lib/apis/odds-api';
-import { extractValueBets, getSmartPicks, calculateBettingStats } from '@/lib/algorithms/value-bet-calculator';
+import { extractValueBets, getSmartPicks, calculateBettingStats, enrichPicksWithStats } from '@/lib/algorithms/value-bet-calculator';
 import LocalTime from '@/components/LocalTime';
 import BankrollWidget from '@/components/bankroll/BankrollWidget';
 import PickCard from '@/components/value-bets/PickCard';
@@ -52,7 +52,10 @@ export default async function DashboardPage() {
 
   const allValidMatches = [...upcoming, ...possiblyLive];
   // Calculate best picks for ALL valid matches
-  let smartPicks = getSmartPicks(allValidMatches, true);
+  let baseSmartPicks = getSmartPicks(allValidMatches, true);
+  
+  // Enrich picks with SofaScore / APIs
+  let smartPicks = await enrichPicksWithStats(baseSmartPicks);
 
   // Sort them by time so they make chronological chronological sense
   smartPicks.sort((a, b) => new Date(a.commenceTime).getTime() - new Date(b.commenceTime).getTime());

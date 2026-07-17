@@ -716,6 +716,54 @@ export function getSmartPicks(
   });
 }
 
+// ========== INTEGRACIÓN DE APIs (FASE 3) ==========
+
+import { getTeamForm } from '@/lib/apis/sofascore';
+// import { searchNBATeam, getNBATeamRecord } from '@/lib/apis/balldontlie';
+
+/**
+ * Enriquece asíncronamente los picks recomendados con estadísticas de SofaScore (y BallDontLie en el futuro).
+ * Si la API reporta una racha ganadora fuerte (>70%), eleva la confianza a 'alta'.
+ */
+export async function enrichPicksWithStats(picks: SmartPick[]): Promise<SmartPick[]> {
+  // Solo procesar un máximo de picks para no quemar cuotas de la API muy rápido
+  const picksToEnrich = picks.slice(0, 15);
+  
+  const enrichedPicks = await Promise.all(picksToEnrich.map(async (pick) => {
+    // Si ya es 'alta', o si no tiene valor positivo, no gastamos peticiones a la API
+    if (pick.confidence === 'alta' || pick.valuePercentage <= 0) {
+      return pick;
+    }
+
+    // Identificar de qué equipo apostamos a que gana (Gana X)
+    const matchGana = pick.bestPick.match(/Gana (.+)/);
+    if (matchGana && matchGana[1]) {
+      const teamName = matchGana[1];
+      
+      // Llamada asíncrona a SofaScore (caché gestionado en la API)
+      const form = await getTeamForm(teamName);
+      
+      if (form && form.winPercentage >= 70) {
+        // Boost de confianza por buena racha!
+        return {
+          ...pick,
+          confidence: 'alta' as const,
+          // Agregamos un pequeño tooltip mental: el equipo viene muy bien
+          bestPick: `${pick.bestPick} 🔥`
+        };
+      }
+    }
+    
+    // Si no hubo boost, retornamos el pick original
+    return pick;
+  }));
+
+  // Los picks que no procesamos (si había más de 15) los dejamos igual
+  const rest = picks.slice(15);
+  return [...enrichedPicks, ...rest];
+}
+
+
 // ========== PICKS DIARIOS CON FILTRO DE CALIDAD ==========
 
 export interface DailyPicksConfig {

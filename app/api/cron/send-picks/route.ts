@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getUpcomingMatches } from '@/lib/apis/odds-api';
-import { getTopDailyPicks } from '@/lib/algorithms/value-bet-calculator';
+import { getTopDailyPicks, enrichPicksWithStats } from '@/lib/algorithms/value-bet-calculator';
 import { sendDailyPicksTelegram, sendPickAlertTelegram } from '@/lib/notifications/telegram';
 import { createClient } from '@supabase/supabase-js';
 
@@ -87,7 +87,7 @@ export async function GET(request: Request) {
     }
 
     // 3. Calcular los mejores picks del día (5-10, con filtro de calidad)
-    const topPicks = getTopDailyPicks(events, {
+    let topPicks = getTopDailyPicks(events, {
       minPicks:             5,
       maxPicks:             10,
       requireHighConfidence: false, // incluir también confianza media
@@ -97,6 +97,10 @@ export async function GET(request: Request) {
       console.log('[send-picks] Sin picks de calidad suficiente hoy');
       return NextResponse.json({ ok: true, skipped: true, reason: 'No quality picks today' });
     }
+
+    // 3.5 Enriquecer picks con APIs externas (SofaScore)
+    // Esto podría subir la confianza de algunos picks de 'media' a 'alta'
+    topPicks = await enrichPicksWithStats(topPicks);
 
     console.log(`[send-picks] ${topPicks.length} picks calculados. Enviando notificaciones...`);
 
