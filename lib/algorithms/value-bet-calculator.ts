@@ -697,15 +697,13 @@ export function getSmartPicks(
       picks.push(bp);
     }
   }
-  // Marcar picks recomendados (los que pasan el estricto filtro de zonas/value)
-  for (const p of picks) {
+  // Filtrar picks recomendados (los que pasan el estricto filtro de zonas/value)
+  const acceptablePicks = picks.filter(p => {
     p.isRecommended = isOddsAcceptable(p.bestOdds, p.valuePercentage, p.pinnacleAligns);
-  }
+    return p.isRecommended;
+  });
 
-  return picks.sort((a, b) => {
-    // 0. Recomendados primero
-    if (a.isRecommended && !b.isRecommended) return -1;
-    if (b.isRecommended && !a.isRecommended) return 1;
+  return acceptablePicks.sort((a, b) => {
     // 1. Picks con value real antes que fallbacks
     if (a.valuePercentage > 0 && b.valuePercentage <= 0) return -1;
     if (b.valuePercentage > 0 && a.valuePercentage <= 0) return 1;
