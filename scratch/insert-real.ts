@@ -21,7 +21,7 @@ async function run() {
       try {
         const json = JSON.parse(parts[1].trim());
         allEvents.push(...json);
-      } catch(e) { console.error('Failed to parse JSON', e.message) }
+      } catch(e) { console.error('Failed to parse JSON', (e as Error).message) }
     }
   }
 
