@@ -123,44 +123,36 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
   }
 
   try {
-    const results: OddEvent[][] = [];
-    for (const s of targetSports) {
+    const fetchPromises = targetSports.map(async (s) => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 15000);
       const url = `https://api.the-odds-api.com/v4/sports/${s}/odds?apiKey=${API_KEY}&regions=eu,us,uk,au&markets=h2h,totals&oddsFormat=decimal`;
 
-      try {
-        const response = await fetch(url, {
-          signal: controller.signal,
-          next: { revalidate: 21600 }, // 6 horas
-        });
-        clearTimeout(timeoutId);
+      const response = await fetch(url, {
+        signal: controller.signal,
+        next: { revalidate: 21600 }, // 6 horas
+      });
+      clearTimeout(timeoutId);
 
-        // Registrar uso de la key con los headers exactos de la respuesta
-        await recordKeyUsage(API_KEY, response.headers);
+      // Registrar uso de la key con los headers exactos de la respuesta
+      await recordKeyUsage(API_KEY, response.headers);
 
-        if (!response.ok) {
-          const used      = response.headers.get('x-requests-used');
-          const remaining = response.headers.get('x-requests-remaining');
-          console.error(`[OddsAPI] Falla al obtener ${s}. Código: ${response.status}. Usados: ${used}, Restantes: ${remaining}`);
+      if (!response.ok) {
+        const used      = response.headers.get('x-requests-used');
+        const remaining = response.headers.get('x-requests-remaining');
+        console.error(`[OddsAPI] Falla al obtener ${s}. Código: ${response.status}. Usados: ${used}, Restantes: ${remaining}`);
 
-          // Si es error de autenticación o rate limit, marcar key como agotada
-          if (response.status === 401 || response.status === 429) {
-            await markKeyExhausted(API_KEY);
-            console.warn(`[OddsAPI] ⚠️ Key marcada como agotada por error ${response.status}. El próximo cron usará la siguiente key.`);
-          }
-        } else {
-          const data = await response.json();
-          results.push(data);
+        // Si es error de autenticación o rate limit, marcar key como agotada
+        if (response.status === 401 || response.status === 429) {
+          await markKeyExhausted(API_KEY);
+          console.warn(`[OddsAPI] ⚠️ Key marcada como agotada por error ${response.status}. El próximo cron usará la siguiente key.`);
         }
-      } catch (err) {
-        console.error(`[OddsAPI] Error obteniendo ${s}:`, err);
+        return [];
       }
-      
-      // Pequeño delay de 500ms para no saturar la API
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
+      return await response.json();
+    });
 
+    const results = await Promise.all(fetchPromises);
     // Flatten array of arrays
     const allEvents: OddEvent[] = results.flat();
 

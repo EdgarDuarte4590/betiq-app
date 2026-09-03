@@ -3,6 +3,8 @@ import { getUpcomingMatches } from '@/lib/apis/odds-api';
 import { saveOddsSnapshot } from '@/app/actions/snapshots';
 import { createClient } from '@/lib/supabase/server';
 
+export const maxDuration = 60; // Permitir que el cron dure hasta 60s en Vercel Hobby
+
 // El único lugar donde se llama a The Odds API. El Dashboard lee desde odds_snapshots.
 const MIN_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 horas mínimo entre refreshes
 
