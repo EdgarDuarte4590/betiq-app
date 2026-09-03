@@ -34,7 +34,7 @@ export async function saveOddsSnapshot(events: OddEvent[]) {
       (bk.markets ?? []).flatMap(market =>
         (market.outcomes ?? []).map(outcome => ({
           event_id: event.id,
-          event_label: `${event.home_team} vs ${event.away_team}`,
+          event_label: `${event.home_team} vs ${event.away_team} | ${event.commence_time}`,
           sport_key: event.sport_key,
           bookmaker_key: bk.key,
           market_key: market.key,

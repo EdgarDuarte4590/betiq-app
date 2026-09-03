@@ -106,16 +106,19 @@ function reconstructOddEvents(rows: SnapshotRow[]): OddEvent[] {
 
   for (const row of rows) {
     if (!eventMap.has(row.event_id)) {
-      // Parsear "Home vs Away" del event_label
-      const parts = row.event_label.split(' vs ');
-      const homeTeam = parts[0]?.trim() ?? row.event_label;
-      const awayTeam = parts[1]?.trim() ?? '';
+      // Parsear "Home vs Away | commence_time" del event_label
+      const parts = row.event_label.split(' | ');
+      const teamsPart = parts[0];
+      const commenceTime = parts[1] || new Date().toISOString();
+      const teamParts = teamsPart.split(' vs ');
+      const homeTeam = teamParts[0]?.trim() ?? teamsPart;
+      const awayTeam = teamParts[1]?.trim() ?? '';
 
       eventMap.set(row.event_id, {
         id: row.event_id,
         sport_key: row.sport_key,
         sport_title: getSportTitle(row.sport_key),
-        commence_time: new Date().toISOString(), // No tenemos la hora exacta en snapshots
+        commence_time: commenceTime,
         home_team: homeTeam,
         away_team: awayTeam,
         bookmakers: new Map(),
