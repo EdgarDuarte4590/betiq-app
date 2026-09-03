@@ -9,6 +9,8 @@
  */
 
 import { createClient } from '@/lib/supabase/server';
+import { createClient as createClientBrowser } from '@supabase/supabase-js';
+import { unstable_cache } from 'next/cache';
 import type { OddEvent, Bookmaker, Market, Outcome } from '@/lib/apis/odds-api';
 
 const MAX_SNAPSHOT_AGE_HOURS = 8; // Si los datos tienen más de 8h, considerarlos stale
@@ -53,25 +55,51 @@ export async function getDashboardData(): Promise<OddEvent[]> {
 
     if (ageHours > MAX_SNAPSHOT_AGE_HOURS) {
       console.warn(`[DashboardData] ⚠️ Último snapshot tiene ${ageHours.toFixed(1)}h. Datos potencialmente desactualizados.`);
-      // Continuamos de todas formas — algo es mejor que nada
     }
+
+    // Usar caché compartido para no saturar Supabase con 35 queries por cada usuario
+    const fetchCached = unstable_cache(
+      async (cutoffIso: string) => {
+        // Necesitamos un cliente que no use cookies para que unstable_cache funcione correctamente
+        const supaAdmin = createClientBrowser(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+        const { count } = await supaAdmin
+          .from('odds_snapshots')
+          .select('*', { count: 'exact', head: true })
+          .gte('recorded_at', cutoffIso);
+
+        if (!count) return [];
+
+        const pageSize = 1000;
+        const pages = Math.ceil(count / pageSize);
+        const fetchPromises = [];
+
+        for (let i = 0; i < pages; i++) {
+          const from = i * pageSize;
+          const to = from + pageSize - 1;
+          fetchPromises.push(
+            supaAdmin
+              .from('odds_snapshots')
+              .select('event_id, event_label, sport_key, bookmaker_key, market_key, outcome_name, odds, recorded_at')
+              .gte('recorded_at', cutoffIso)
+              .order('recorded_at', { ascending: false })
+              .range(from, to)
+          );
+        }
+
+        const results = await Promise.all(fetchPromises);
+        return results.flatMap(res => res.data || []);
+      },
+      ['odds-snapshot-full'],
+      { revalidate: 300 } // 5 minutos de caché
+    );
+
+    const cutoffTime = new Date(latestRow.recorded_at);
+    cutoffTime.setMinutes(cutoffTime.getMinutes() - 30);
+    
+    const rows = await fetchCached(cutoffTime.toISOString());
 
     // ── Leer snapshot más reciente ───────────────────────────────────────────
     // Solo leemos el último bloque de snapshots (dentro de 30 min del último registro)
-    const cutoffTime = new Date(latestRow.recorded_at);
-    cutoffTime.setMinutes(cutoffTime.getMinutes() - 30); // Ventana de 30 min para el mismo "batch"
-
-    const { data: rows, error } = await supabase
-      .from('odds_snapshots')
-      .select('event_id, event_label, sport_key, bookmaker_key, market_key, outcome_name, odds, recorded_at')
-      .gte('recorded_at', cutoffTime.toISOString())
-      .order('recorded_at', { ascending: false });
-
-    if (error) {
-      console.error('[DashboardData] Error leyendo odds_snapshots:', error.message);
-      return [];
-    }
-
     if (!rows || rows.length === 0) {
       console.warn('[DashboardData] No hay filas en odds_snapshots para el período reciente.');
       return [];
