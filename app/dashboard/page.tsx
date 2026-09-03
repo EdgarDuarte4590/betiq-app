@@ -1,25 +1,27 @@
 import { createClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
 import { Zap, DollarSign, Target, TrendingUp, Activity, Clock } from 'lucide-react';
-import { getUpcomingMatches, categorizeEventsByTime } from '@/lib/apis/odds-api';
-import { extractValueBets, getSmartPicks, calculateBettingStats, enrichPicksWithStats } from '@/lib/algorithms/value-bet-calculator';
+import { categorizeEventsByTime } from '@/lib/apis/odds-api';
+import { extractValueBets, getSmartPicks, calculateBettingStats, enrichPicksWithStats, enrichPicksWithGemini } from '@/lib/algorithms/value-bet-calculator';
 import LocalTime from '@/components/LocalTime';
 import BankrollWidget from '@/components/bankroll/BankrollWidget';
 import PickCard from '@/components/value-bets/PickCard';
 import PickCardSkeleton from '@/components/ui/PickCardSkeleton';
-import { saveOddsSnapshot } from '@/app/actions/snapshots';
+import { getDashboardData } from '@/lib/data/dashboard-data';
 import { Suspense } from 'react';
+
 
 export default async function DashboardPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  // if (!user) redirect('/login'); // Temporalmente deshabilitado
+  if (!user) redirect('/login');
 
   // ── Data from Supabase ─────
-  const [profileResult, betsResult] = user ? await Promise.all([
+  const [profileResult, betsResult] = await Promise.all([
     supabase.from('profiles').select('bankroll_actual, bankroll_inicial').eq('id', user.id).single(),
     supabase.from('bets').select('status, stake, odds, profit, created_at').eq('user_id', user.id),
-  ]) : [{ data: null }, { data: [] }];
+  ]);
+
 
   const profile = profileResult.data;
   const allBets = (betsResult.data as any[]) ?? [];
@@ -41,21 +43,19 @@ export default async function DashboardPage() {
   const bankrollInicial = parseFloat((profile as any)?.bankroll_inicial ?? '1000');
   const bankrollChange = bankrollActual - bankrollInicial;
 
-  // ── API + Smart Engine ─────
-  const allEvents = await getUpcomingMatches('upcoming');
-  try {
-    await saveOddsSnapshot(allEvents); 
-  } catch (e) {
-    console.error('Error in saveOddsSnapshot:', e);
-  }
+  // ── Odds desde Supabase (sin llamar a la API externa) ─────
+  // getDashboardData() lee odds_snapshots — el cron refresh-odds es el único
+  // que llama a The Odds API. Esto reduce el consumo de keys en ~80%.
+  const allEvents = await getDashboardData();
   const { upcoming, possiblyLive } = categorizeEventsByTime(allEvents);
 
   const allValidMatches = [...upcoming, ...possiblyLive];
-  // Calculate best picks for ALL valid matches
   let baseSmartPicks = getSmartPicks(allValidMatches, true);
+  let smartPicksStats = await enrichPicksWithStats(baseSmartPicks);
   
-  // Enrich picks with SofaScore / APIs
-  let smartPicks = await enrichPicksWithStats(baseSmartPicks);
+  // Agregar el razonamiento descriptivo generado por Gemini a los top picks
+  let smartPicks = await enrichPicksWithGemini(smartPicksStats);
+
 
   // Sort them by time so they make chronological chronological sense
   smartPicks.sort((a, b) => new Date(a.commenceTime).getTime() - new Date(b.commenceTime).getTime());
@@ -130,30 +130,10 @@ export default async function DashboardPage() {
           Dashboard <span className="gradient-text">BetIQ</span>
         </h1>
         <p style={{ color: 'var(--foreground-muted)', marginTop: 4, fontSize: '0.85rem' }}>
-          {user ? `Bienvenido · ${user.email}` : 'Modo Demo · Inicia sesión para guardar tus picks'}
+          Bienvenido · {user.email}
         </p>
-      </div>
 
-      {/* Demo mode banner */}
-      {!user && (
-        <div style={{
-          marginBottom: '1.25rem', padding: '0.75rem 1rem',
-          background: 'linear-gradient(90deg, rgba(59,130,246,0.08), rgba(59,130,246,0.04))',
-          border: '1px solid rgba(59,130,246,0.2)', borderRadius: 10,
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8,
-        }}>
-          <div style={{ fontSize: '0.82rem', color: 'var(--foreground-muted)' }}>
-            <span style={{ color: 'var(--accent-blue)', fontWeight: 700 }}>Modo Demo</span> — Estás viendo el análisis en vivo. Inicia sesión para guardar picks y rastrear tu bankroll.
-          </div>
-          <a href="/login" style={{
-            padding: '0.4rem 0.875rem', borderRadius: 7,
-            background: 'var(--accent-blue)', color: '#fff',
-            fontSize: '0.78rem', fontWeight: 700, textDecoration: 'none',
-          }}>
-            Inicia sesión
-          </a>
-        </div>
-      )}
+      </div>
 
       {/* Stat Cards */}
       <div className="stats-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.75rem', marginBottom: '1.5rem' }}>

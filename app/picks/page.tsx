@@ -9,7 +9,8 @@ export default async function PicksPage() {
   const supabase = await createClient();
 
   const { data: { user } } = await supabase.auth.getUser();
-  // if (!user) redirect('/login'); // Temporalmente deshabilitado
+  if (!user) redirect('/login');
+
 
   const { data: bets = [] } = user ? await supabase
     .from('bets')

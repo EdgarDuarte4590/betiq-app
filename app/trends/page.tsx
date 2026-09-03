@@ -1,12 +1,15 @@
 import { createClient } from '@/lib/supabase/server';
+import { redirect } from 'next/navigation';
 import { TrendingUp, BarChart2, Trophy, Target, DollarSign, Activity, Compass } from 'lucide-react';
 import { calculateBettingStats } from '@/lib/algorithms/value-bet-calculator';
 import LineChart from '@/components/ui/LineChart';
 
+
 export default async function TrendsPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  // if (!user) redirect('/login'); // Temporalmente deshabilitado
+  if (!user) redirect('/login');
+
 
   const { data: bets = [] } = user ? await supabase
     .from('bets')

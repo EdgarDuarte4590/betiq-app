@@ -21,12 +21,12 @@ export default function RegisterPage() {
     setLoading(true);
     setError(null);
 
+    // signUp sin emailRedirectTo — evita el correo de confirmación de Supabase.
+    // IMPORTANTE: En Supabase Dashboard → Auth → Email → desactivar "Confirm email"
+    // para que el usuario pueda logearse inmediatamente después del registro.
     const { error: signUpError } = await supabase.auth.signUp({
       email,
       password,
-      options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
-      },
     });
 
     if (signUpError) {
@@ -35,12 +35,12 @@ export default function RegisterPage() {
     } else {
       setSuccess(true);
       setLoading(false);
-      // Opcional: Redirigir después de unos segundos o pedir que verifique email
       setTimeout(() => {
         router.push('/login');
-      }, 3000);
+      }, 2000);
     }
   };
+
 
   return (
     <div style={{
@@ -99,9 +99,10 @@ export default function RegisterPage() {
             <CheckCircle2 size={48} color="var(--accent-green)" />
             <h3 style={{ fontSize: '1.25rem', fontWeight: 700 }}>¡Cuenta Creada!</h3>
             <p style={{ color: 'var(--foreground-muted)', fontSize: '0.9rem' }}>
-              Te hemos enviado un correo de confirmación. En unos segundos serás redirigido al login.
+              Tu cuenta fue creada exitosamente. En unos segundos serás redirigido al login para iniciar sesión.
             </p>
           </div>
+
         ) : (
           <form onSubmit={handleRegister} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
             <div>
