@@ -48,8 +48,14 @@ export async function saveOddsSnapshot(events: OddEvent[]) {
 
   if (rows.length === 0) return;
 
-  // Upsert para no duplicar si se llama varias veces en la misma hora
-  await supabase
+  // Insertar los nuevos snapshots en la tabla
+  const { error } = await supabase
     .from('odds_snapshots')
-    .upsert(rows, { onConflict: 'event_id,bookmaker_key,market_key,outcome_name,recorded_at' });
+    .insert(rows);
+
+  if (error) {
+    console.error('[Snapshots] Error al insertar en BD:', error);
+  } else {
+    console.log(`[Snapshots] ✅ Guardados ${rows.length} outcomes en la BD.`);
+  }
 }
