@@ -3,6 +3,7 @@ import { getUpcomingMatches } from '@/lib/apis/odds-api';
 import { saveOddsSnapshot } from '@/app/actions/snapshots';
 import { createClient } from '@/lib/supabase/server';
 
+export const runtime = 'edge';
 export const maxDuration = 60; // Permitir que el cron dure hasta 60s en Vercel Hobby
 
 // El único lugar donde se llama a The Odds API. El Dashboard lee desde odds_snapshots.
