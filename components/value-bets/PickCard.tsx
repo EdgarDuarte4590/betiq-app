@@ -4,8 +4,7 @@ import LocalTime from '@/components/LocalTime';
 import { useBankrollStore } from '@/lib/store/bankrollStore';
 import type { SmartPick } from '@/lib/algorithms/value-bet-calculator';
 import { getSportMeta } from '@/lib/apis/odds-api';
-import { ShieldCheck, AlertTriangle, Eye, TrendingUp, Zap } from 'lucide-react';
-
+import { ShieldCheck, AlertTriangle, Eye, TrendingUp } from 'lucide-react';
 
 export default function PickCard({ pick, isLive = false }: { pick: SmartPick; isLive?: boolean }) {
   const { openModal, bankroll } = useBankrollStore();
@@ -236,29 +235,8 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
               ))}
             </div>
           )}
-
-          {/* AI Reasoning */}
-          {pick.reasoning && (
-            <div style={{
-              marginTop: 10,
-              padding: '0.65rem 0.8rem',
-              background: 'linear-gradient(90deg, rgba(59,130,246,0.08) 0%, rgba(59,130,246,0.02) 100%)',
-              borderLeft: '2px solid var(--accent-blue)',
-              borderRadius: '0 8px 8px 0',
-              fontSize: '0.78rem',
-              color: 'var(--foreground)',
-              lineHeight: 1.5,
-              position: 'relative'
-            }}>
-              <div style={{ position: 'absolute', top: 8, right: 10, fontSize: '0.65rem', color: 'var(--accent-blue)', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 3, opacity: 0.8 }}>
-                <Zap size={10} fill="currentColor" /> IA
-              </div>
-              <div style={{ fontStyle: 'italic', paddingRight: '1rem' }}>"{pick.reasoning}"</div>
-            </div>
-          )}
         </div>
       )}
-
 
       {/* Fallback explanation */}
       {!pick.isRecommended && (

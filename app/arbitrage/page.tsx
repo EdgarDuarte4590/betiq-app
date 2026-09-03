@@ -1,11 +1,11 @@
-import { getDashboardData } from '@/lib/data/dashboard-data';
+import { getUpcomingMatches } from '@/lib/apis/odds-api';
 import { detectArbitrage } from '@/lib/algorithms/arbitrage-scanner';
 import LocalTime from '@/components/LocalTime';
 import { Percent, Info } from 'lucide-react';
 
 export default async function ArbitragePage() {
   // No auth required — arbitrage data is public
-  const events = await getDashboardData();
+  const events = await getUpcomingMatches('upcoming');
   const arbs = detectArbitrage(events, 0.5);
 
   return (

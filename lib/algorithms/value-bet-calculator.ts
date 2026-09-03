@@ -119,43 +119,9 @@ export interface SmartPick {
   pinnacleAligns: boolean;   // true si sharp books respaldan el pick
   isFallback: boolean;       // true = no tiene value edge real, solo la mejor opción disponible
   isRecommended: boolean;    // true = cumple criterios estrictos (zonas/value) para notificación
-  reasoning?: string;        // Análisis generado por Gemini en español (agregado en M2)
 }
 
-
-// ========== ENRIQUECIMIENTO CON IA (M2: Dashboard Intelligence) ==========
-
-import { getPickReasoning } from '@/lib/ai/gemini';
-
-/**
- * Recibe una lista de SmartPicks (previamente filtrados y enriquecidos con stats),
- * y obtiene el razonamiento explicativo de la IA para los mejores picks.
- * Para ahorrar tokens y llamadas, solo generamos reasoning para los top 5 picks.
- */
-export async function enrichPicksWithGemini(picks: SmartPick[]): Promise<SmartPick[]> {
-  if (picks.length === 0) return [];
-
-  // Solo nos interesan los top 5 mejores picks (ordenados por value y confianza)
-  // El resto se devolverá sin el campo reasoning.
-  const topPicks = picks.slice(0, 5);
-  const restPicks = picks.slice(5);
-
-  const enrichedTop = await Promise.all(
-    topPicks.map(async (pick) => {
-      try {
-        const reasoning = await getPickReasoning(pick);
-        return { ...pick, reasoning };
-      } catch (err) {
-        console.error(`[ValueBetCalculator] Error enrichPicksWithGemini en evento ${pick.eventId}:`, err);
-        return pick;
-      }
-    })
-  );
-
-  return [...enrichedTop, ...restPicks];
-}
-
-// ========== MAIN: GET SMART PICKS ==========
+// ========== DEPORTES PRINCIPALES ==========
 
 const MAIN_SPORTS = [
   'soccer', 'basketball', 'baseball',

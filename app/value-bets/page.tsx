@@ -1,10 +1,9 @@
-import { categorizeEventsByTime } from '@/lib/apis/odds-api';
-import { getDashboardData } from '@/lib/data/dashboard-data';
+import { getUpcomingMatches, categorizeEventsByTime } from '@/lib/apis/odds-api';
 import { extractAllValueBets } from '@/lib/algorithms/value-bet-calculator';
 import ValueBetsClient from './ValueBetsClient';
 
 export default async function ValueBetsPage() {
-  const allEvents = await getDashboardData();
+  const allEvents = await getUpcomingMatches('upcoming');
   const { upcoming, possiblyLive } = categorizeEventsByTime(allEvents);
   const allValid = [...upcoming, ...possiblyLive];
   

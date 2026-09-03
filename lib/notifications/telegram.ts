@@ -1,11 +1,8 @@
 /**
- * BetIQ Telegram Notifier v3.0
+ * BetIQ Telegram Notifier
  *
  * Envía picks diarios y alertas de alta confianza vía Telegram Bot API.
  * Sin dependencias externas — usa fetch nativo.
- *
- * IMPORTANTE: Usa HTML parse mode (no MarkdownV2) para evitar errores de
- * escape con caracteres especiales en nombres de equipos y ligas.
  *
  * Setup (una vez):
  *   1. Crea un bot en Telegram con @BotFather → obtienes TELEGRAM_BOT_TOKEN
@@ -63,19 +60,10 @@ function formatDate(): string {
   });
 }
 
-/** Escapa caracteres especiales de HTML para evitar que rompan el parseado */
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
 // ── Construcción del mensaje ─────────────────────────────────────────────────
 
 /**
- * Construye el mensaje de picks diarios en formato HTML para Telegram.
- * HTML es más robusto que MarkdownV2 — no requiere escapar caracteres especiales.
+ * Construye el mensaje de picks diarios en formato Telegram (Markdown v2 escapado).
  */
 export function buildDailyPicksMessage(picks: SmartPick[]): string {
   const highConfidence = picks.filter(p => p.confidence === 'alta');
@@ -83,8 +71,8 @@ export function buildDailyPicksMessage(picks: SmartPick[]): string {
   const dateStr        = formatDate();
 
   const lines: string[] = [
-    `🎯 <b>BetIQ — Picks del Día</b>`,
-    `📅 ${escapeHtml(dateStr)}`,
+    `🎯 *BetIQ — Picks del Día*`,
+    `📅 ${dateStr}`,
     `━━━━━━━━━━━━━━━━━━━━`,
     '',
   ];
@@ -97,20 +85,20 @@ export function buildDailyPicksMessage(picks: SmartPick[]): string {
     const kellyStr    = pick.kellyStake > 0 ? `${pick.kellyStake.toFixed(1)}% bankroll` : '—';
     const pinnacle    = pick.pinnacleAligns ? ' ✅ Sharp' : '';
 
-    lines.push(`<b>${i + 1}. ${icon} ${escapeHtml(pick.event)}</b>`);
-    lines.push(`📌 ${escapeHtml(pick.bestPick)} (${escapeHtml(pick.bestMarket)})`);
-    lines.push(`💰 Cuota: <b>${pick.bestOdds.toFixed(2)}</b> (${escapeHtml(pick.oddsRange)})`);
-    lines.push(`📊 Value: <b>${valueStr}</b> | Kelly: ${kellyStr}${pinnacle}`);
-    lines.push(`${confEmoji} Confianza: <b>${pick.confidence.toUpperCase()}</b>`);
-    lines.push(`⏰ ${time} | ${escapeHtml(pick.league)}`);
+    lines.push(`*${i + 1}\\. ${icon} ${pick.event}*`);
+    lines.push(`📌 ${pick.bestPick} \\(${pick.bestMarket}\\)`);
+    lines.push(`💰 Cuota: *${pick.bestOdds.toFixed(2)}* \\(${pick.oddsRange}\\)`);
+    lines.push(`📊 Value: *${valueStr}* \\| Kelly: ${kellyStr}${pinnacle}`);
+    lines.push(`${confEmoji} Confianza: *${pick.confidence.toUpperCase()}*`);
+    lines.push(`⏰ ${time} \\| ${pick.league}`);
     lines.push('');
   });
 
   lines.push('━━━━━━━━━━━━━━━━━━━━');
-  lines.push(`📈 Total picks: <b>${picks.length}</b> | 🟢 Alta confianza: <b>${highConfidence.length}</b> | 🟡 Media: <b>${medConfidence.length}</b>`);
+  lines.push(`📈 Total picks: *${picks.length}* \\| 🟢 Alta confianza: *${highConfidence.length}* \\| 🟡 Media: *${medConfidence.length}*`);
   lines.push('');
-  lines.push('<i>Análisis generado automáticamente por BetIQ v3.0</i>');
-  lines.push('<i>Apostar responsablemente. Esto no es consejo financiero.</i>');
+  lines.push('_Análisis generado automáticamente por BetIQ v3\\.0_');
+  lines.push('_Apostar responsablemente\\. Esto no es consejo financiero\\._');
 
   return lines.join('\n');
 }
@@ -123,19 +111,19 @@ export function buildAlertMessage(pick: SmartPick): string {
   const time     = formatMatchTime(pick.commenceTime);
   const valueStr = pick.valuePercentage > 0 ? `+${pick.valuePercentage.toFixed(1)}%` : 'N/A';
   const kellyStr = pick.kellyStake > 0 ? `${pick.kellyStake.toFixed(1)}% bankroll` : '—';
-  const pinnacle = pick.pinnacleAligns ? '\n✅ <b>Respaldado por Pinnacle/Sharp books</b>' : '';
+  const pinnacle = pick.pinnacleAligns ? '\n✅ *Respaldado por Pinnacle/Sharp books*' : '';
 
   return [
-    `🚨 <b>BetIQ — Pick de Alta Confianza</b>`,
+    `🚨 *BetIQ — Pick de Alta Confianza*`,
     '',
-    `${icon} <b>${escapeHtml(pick.event)}</b>`,
-    `📌 ${escapeHtml(pick.bestPick)} (${escapeHtml(pick.bestMarket)})`,
-    `💰 Cuota: <b>${pick.bestOdds.toFixed(2)}</b> en ${escapeHtml(pick.oddsRange)}`,
-    `📊 Value: <b>${valueStr}</b> | Kelly: ${kellyStr}`,
-    `🟢 Confianza: <b>ALTA</b>${pinnacle}`,
-    `⏰ ${time} | ${escapeHtml(pick.league)}`,
+    `${icon} *${pick.event}*`,
+    `📌 ${pick.bestPick} \\(${pick.bestMarket}\\)`,
+    `💰 Cuota: *${pick.bestOdds.toFixed(2)}* en ${pick.oddsRange}`,
+    `📊 Value: *${valueStr}* \\| Kelly: ${kellyStr}`,
+    `🟢 Confianza: *ALTA*${pinnacle}`,
+    `⏰ ${time} \\| ${pick.league}`,
     '',
-    '<i>BetIQ v3.0 — Apostar responsablemente</i>',
+    '_BetIQ v3\\.0 — Apostar responsablemente_',
   ].join('\n');
 }
 
@@ -147,17 +135,17 @@ interface TelegramResult {
 }
 
 /**
- * Envía un mensaje de texto a un chat de Telegram usando HTML parse mode.
- * HTML es más robusto que MarkdownV2 — no requiere escapar caracteres especiales.
+ * Envía un mensaje de texto a un chat de Telegram.
  */
 async function sendTelegramMessage(
   text: string,
+  parseMode: 'MarkdownV2' | 'HTML' = 'MarkdownV2'
 ): Promise<TelegramResult> {
   const token  = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
 
   if (!token || !chatId) {
-    console.warn('[Telegram] Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID en las env vars');
+    console.warn('[Telegram] Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID en .env.local');
     return { ok: false, error: 'Missing Telegram credentials' };
   }
 
@@ -166,9 +154,9 @@ async function sendTelegramMessage(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id:                  chatId,
+        chat_id:    chatId,
         text,
-        parse_mode:               'HTML',
+        parse_mode: parseMode,
         disable_web_page_preview: true,
       }),
     });
@@ -212,17 +200,16 @@ export async function sendPickAlertTelegram(pick: SmartPick): Promise<TelegramRe
 
 /**
  * Prueba de conectividad: envía un mensaje simple para verificar que el bot funciona.
- * Llamar a GET /api/admin/test-telegram para usarla.
  */
 export async function sendTestTelegram(): Promise<TelegramResult> {
   const token  = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
 
   if (!token || !chatId) {
-    return { ok: false, error: 'Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID' };
+    return { ok: false, error: 'Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID in .env.local' };
   }
 
   return sendTelegramMessage(
-    '✅ <b>BetIQ v3.0 — Bot conectado correctamente!</b>\n\nLas notificaciones de picks están activas.',
+    '✅ *BetIQ v3\\.0 — Bot conectado correctamente\\!*\n\nLas notificaciones de picks están activas\\.',
   );
 }

@@ -6,13 +6,12 @@ import BankrollPageClient from './BankrollPageClient';
 export default async function BankrollPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) redirect('/login');
+  // if (!user) redirect('/login'); // Temporalmente deshabilitado
 
-  const [profileResult, betsResult] = await Promise.all([
+  const [profileResult, betsResult] = user ? await Promise.all([
     supabase.from('profiles').select('bankroll_actual, bankroll_inicial').eq('id', user.id).single(),
     supabase.from('bets').select('status, stake, odds, profit, created_at').eq('user_id', user.id).order('created_at', { ascending: true }),
-  ]);
-
+  ]) : [{ data: null }, { data: [] }];
 
   const profile = profileResult.data;
   const allBets = (betsResult.data as any[]) ?? [];

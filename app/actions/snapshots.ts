@@ -34,7 +34,7 @@ export async function saveOddsSnapshot(events: OddEvent[]) {
       (bk.markets ?? []).flatMap(market =>
         (market.outcomes ?? []).map(outcome => ({
           event_id: event.id,
-          event_label: `${event.home_team} vs ${event.away_team} | ${event.commence_time}`,
+          event_label: `${event.home_team} vs ${event.away_team}`,
           sport_key: event.sport_key,
           bookmaker_key: bk.key,
           market_key: market.key,
@@ -48,14 +48,8 @@ export async function saveOddsSnapshot(events: OddEvent[]) {
 
   if (rows.length === 0) return;
 
-  // Insertar los nuevos snapshots en la tabla
-  const { error } = await supabase
+  // Upsert para no duplicar si se llama varias veces en la misma hora
+  await supabase
     .from('odds_snapshots')
-    .insert(rows);
-
-  if (error) {
-    console.error('[Snapshots] Error al insertar en BD:', error);
-  } else {
-    console.log(`[Snapshots] ✅ Guardados ${rows.length} outcomes en la BD.`);
-  }
+    .upsert(rows, { onConflict: 'event_id,bookmaker_key,market_key,outcome_name,recorded_at' });
 }

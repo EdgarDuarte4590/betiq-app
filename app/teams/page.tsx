@@ -1,10 +1,9 @@
 import { Users, Activity, BarChart3 } from 'lucide-react';
-import { categorizeEventsByTime, getSportMeta } from '@/lib/apis/odds-api';
-import { getDashboardData } from '@/lib/data/dashboard-data';
+import { getUpcomingMatches, categorizeEventsByTime, getSportMeta } from '@/lib/apis/odds-api';
 import { isMainSport, removeVig } from '@/lib/algorithms/value-bet-calculator';
 
 export default async function TeamsPage() {
-  const allEvents = await getDashboardData();
+  const allEvents = await getUpcomingMatches('upcoming');
   const { upcoming, possiblyLive } = categorizeEventsByTime(allEvents);
   const allValid = [...upcoming, ...possiblyLive];
 
