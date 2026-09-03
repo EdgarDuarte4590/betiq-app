@@ -104,6 +104,48 @@ export function buildDailyPicksMessage(picks: SmartPick[]): string {
 }
 
 /**
+ * Versión del mensaje diario en texto plano (sin Markdown).
+ * Úsala como fallback si MarkdownV2 falla.
+ */
+export function buildDailyPicksMessagePlain(picks: SmartPick[]): string {
+  const highConfidence = picks.filter(p => p.confidence === 'alta');
+  const medConfidence  = picks.filter(p => p.confidence === 'media');
+  const dateStr        = formatDate();
+
+  const lines: string[] = [
+    `🎯 BetIQ — Picks del Día`,
+    `📅 ${dateStr}`,
+    `━━━━━━━━━━━━━━━━━━━━`,
+    '',
+  ];
+
+  picks.forEach((pick, i) => {
+    const icon      = getSportIcon(pick.sport);
+    const confEmoji = getConfidenceEmoji(pick.confidence);
+    const time      = formatMatchTime(pick.commenceTime);
+    const valueStr  = pick.valuePercentage > 0 ? `+${pick.valuePercentage.toFixed(1)}%` : 'N/A';
+    const kellyStr  = pick.kellyStake > 0 ? `${pick.kellyStake.toFixed(1)}% bankroll` : '—';
+    const pinnacle  = pick.pinnacleAligns ? ' ✅ Sharp' : '';
+
+    lines.push(`${i + 1}. ${icon} ${pick.event}`);
+    lines.push(`📌 ${pick.bestPick} (${pick.bestMarket})`);
+    lines.push(`💰 Cuota: ${pick.bestOdds.toFixed(2)} (${pick.oddsRange})`);
+    lines.push(`📊 Value: ${valueStr} | Kelly: ${kellyStr}${pinnacle}`);
+    lines.push(`${confEmoji} Confianza: ${pick.confidence.toUpperCase()}`);
+    lines.push(`⏰ ${time} | ${pick.league}`);
+    lines.push('');
+  });
+
+  lines.push('━━━━━━━━━━━━━━━━━━━━');
+  lines.push(`📈 Total: ${picks.length} | 🟢 Alta: ${highConfidence.length} | 🟡 Media: ${medConfidence.length}`);
+  lines.push('');
+  lines.push('Análisis generado automáticamente por BetIQ v3.0');
+  lines.push('Apostar responsablemente. Esto no es consejo financiero.');
+
+  return lines.join('\n');
+}
+
+/**
  * Construye un mensaje de alerta de pick de alta confianza (notificación inmediata).
  */
 export function buildAlertMessage(pick: SmartPick): string {
@@ -135,11 +177,51 @@ interface TelegramResult {
 }
 
 /**
+ * Verifica si el bot token es válido llamando a /getMe.
+ * No envía ningún mensaje — solo comprueba la autenticación.
+ */
+export async function verifyBotToken(): Promise<{
+  ok: boolean;
+  botName?: string;
+  botUsername?: string;
+  error?: string;
+}> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+
+  if (!token) {
+    return { ok: false, error: 'TELEGRAM_BOT_TOKEN no está configurado en .env.local' };
+  }
+
+  try {
+    const res  = await fetch(`${TELEGRAM_API}/bot${token}/getMe`);
+    const data = await res.json();
+
+    if (!data.ok) {
+      const errorMsg = data.description ?? 'Token inválido o revocado';
+      console.error(`[Telegram] ❌ Token inválido: ${errorMsg} (código: ${data.error_code})`);
+      return { ok: false, error: `${errorMsg} (error_code: ${data.error_code})` };
+    }
+
+    console.log(`[Telegram] ✅ Bot activo: @${data.result.username} (${data.result.first_name})`);
+    return {
+      ok:          true,
+      botName:     data.result.first_name,
+      botUsername: data.result.username,
+    };
+  } catch (err: any) {
+    console.error('[Telegram] Error de red al verificar token:', err.message);
+    return { ok: false, error: `Error de red: ${err.message}` };
+  }
+}
+
+/**
  * Envía un mensaje de texto a un chat de Telegram.
+ * Si MarkdownV2 falla por un error de parseo, reintenta en texto plano.
  */
 async function sendTelegramMessage(
   text: string,
-  parseMode: 'MarkdownV2' | 'HTML' = 'MarkdownV2'
+  parseMode: 'MarkdownV2' | 'HTML' | null = 'MarkdownV2',
+  plainFallback?: string,
 ): Promise<TelegramResult> {
   const token  = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -150,22 +232,36 @@ async function sendTelegramMessage(
   }
 
   try {
-    const res = await fetch(`${TELEGRAM_API}/bot${token}/sendMessage`, {
-      method: 'POST',
+    const body: Record<string, unknown> = {
+      chat_id:                  chatId,
+      text,
+      disable_web_page_preview: true,
+    };
+    if (parseMode) body.parse_mode = parseMode;
+
+    const res  = await fetch(`${TELEGRAM_API}/bot${token}/sendMessage`, {
+      method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id:    chatId,
-        text,
-        parse_mode: parseMode,
-        disable_web_page_preview: true,
-      }),
+      body:    JSON.stringify(body),
     });
 
     const data = await res.json();
 
     if (!data.ok) {
-      console.error('[Telegram] Error API:', data.description);
-      return { ok: false, error: data.description };
+      const errMsg = data.description ?? 'Error desconocido';
+      console.error(`[Telegram] ❌ API error: ${errMsg} (código: ${data.error_code})`);
+
+      // Si el error es de parseo de Markdown y tenemos fallback, reintentamos en texto plano
+      if (
+        parseMode === 'MarkdownV2' &&
+        plainFallback &&
+        (data.error_code === 400 || errMsg.toLowerCase().includes('parse'))
+      ) {
+        console.warn('[Telegram] ⚠️ Fallo de MarkdownV2, reintentando en texto plano...');
+        return sendTelegramMessage(plainFallback, null);
+      }
+
+      return { ok: false, error: errMsg };
     }
 
     return { ok: true };
@@ -185,8 +281,9 @@ export async function sendDailyPicksTelegram(picks: SmartPick[]): Promise<Telegr
   }
 
   console.log(`[Telegram] 📤 Enviando ${picks.length} picks diarios...`);
-  const message = buildDailyPicksMessage(picks);
-  return sendTelegramMessage(message);
+  const message      = buildDailyPicksMessage(picks);
+  const plainMessage = buildDailyPicksMessagePlain(picks);
+  return sendTelegramMessage(message, 'MarkdownV2', plainMessage);
 }
 
 /**
@@ -195,7 +292,7 @@ export async function sendDailyPicksTelegram(picks: SmartPick[]): Promise<Telegr
 export async function sendPickAlertTelegram(pick: SmartPick): Promise<TelegramResult> {
   console.log(`[Telegram] 🚨 Enviando alerta de pick: ${pick.event}`);
   const message = buildAlertMessage(pick);
-  return sendTelegramMessage(message);
+  return sendTelegramMessage(message, 'MarkdownV2');
 }
 
 /**
@@ -210,6 +307,8 @@ export async function sendTestTelegram(): Promise<TelegramResult> {
   }
 
   return sendTelegramMessage(
-    '✅ *BetIQ v3\\.0 — Bot conectado correctamente\\!*\n\nLas notificaciones de picks están activas\\.',
+    '✅ BetIQ v3.0 — Bot conectado correctamente!\n\nLas notificaciones de picks están activas.',
+    null, // texto plano para el mensaje de prueba
   );
 }
+

@@ -49,7 +49,6 @@ export const SPORT_SCHEDULE: SportSchedule[] = [
   { key: 'baseball_mlb',               label: '⚾ MLB Temporada Regular',      activeFrom: '2026-03-20', activeUntil: '2026-10-31' },
   // ── Baloncesto ──
   { key: 'basketball_nba',             label: '🏀 NBA Temporada Regular',      activeFrom: '2026-10-01', activeUntil: '2027-06-30' },
-  { key: 'basketball_wnba',            label: '🏀 WNBA',                       activeFrom: '2026-05-15', activeUntil: '2026-10-15' },
   // ── Fútbol: Ligas América ──
   { key: 'soccer_usa_mls',             label: '⚽ MLS',                        activeFrom: '2026-02-20', activeUntil: '2026-12-15' },
   { key: 'soccer_brazil_campeonato',   label: '⚽ Brasileirão',                activeFrom: '2026-04-01', activeUntil: '2026-12-07' },

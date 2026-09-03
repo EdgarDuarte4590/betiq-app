@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { sendTestTelegram } from '@/lib/notifications/telegram';
+import { sendTestTelegram, verifyBotToken } from '@/lib/notifications/telegram';
 import { getAllKeyStatuses, initializeKeys } from '@/lib/apis/key-manager';
 
 /**
@@ -35,14 +35,30 @@ export async function GET() {
     results.apiKeys = { error: err.message };
   }
 
-  // 2. Test de Telegram
+  // 2. Verificación del bot de Telegram (llama a /getMe — no gasta mensajes)
   const hasToken  = !!process.env.TELEGRAM_BOT_TOKEN;
   const hasChatId = !!process.env.TELEGRAM_CHAT_ID;
-  results.telegram = {
-    configured: hasToken && hasChatId,
-    tokenSet:   hasToken,
-    chatIdSet:  hasChatId,
-  };
+
+  if (hasToken) {
+    const botVerification = await verifyBotToken();
+    results.telegram = {
+      configured:  hasToken && hasChatId,
+      tokenSet:    hasToken,
+      chatIdSet:   hasChatId,
+      tokenValid:  botVerification.ok,
+      botName:     botVerification.botName ?? null,
+      botUsername: botVerification.botUsername ?? null,
+      tokenError:  botVerification.error ?? null,
+    };
+  } else {
+    results.telegram = {
+      configured:  false,
+      tokenSet:    false,
+      chatIdSet:   hasChatId,
+      tokenValid:  false,
+      tokenError:  'TELEGRAM_BOT_TOKEN no configurado',
+    };
+  }
 
   // 3. Variables de entorno críticas
   results.env = {
@@ -54,6 +70,7 @@ export async function GET() {
 
   return NextResponse.json(results, { status: 200 });
 }
+
 
 /**
  * POST /api/admin/status

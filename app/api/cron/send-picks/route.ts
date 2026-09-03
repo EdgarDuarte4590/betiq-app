@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getUpcomingMatches } from '@/lib/apis/odds-api';
+import { getLatestEventsFromSnapshot } from '@/app/actions/snapshots';
 import { getTopDailyPicks, enrichPicksWithStats } from '@/lib/algorithms/value-bet-calculator';
 import { sendDailyPicksTelegram, sendPickAlertTelegram } from '@/lib/notifications/telegram';
 import { createClient } from '@supabase/supabase-js';
@@ -77,17 +78,26 @@ export async function GET(request: Request) {
       return NextResponse.json({ ok: true, skipped: true, reason: 'Already sent today' });
     }
 
-    // 2. Obtener eventos y calcular picks
-    console.log('[send-picks] Obteniendo partidos del día...');
-    const events = await getUpcomingMatches('upcoming');
+    // 2. Obtener eventos — primero intentar desde el snapshot de Supabase para no gastar requests
+    console.log('[send-picks] Leyendo partidos desde snapshot de Supabase...');
+    const { events, fresh, snapshotAge } = await getLatestEventsFromSnapshot();
 
-    if (events.length === 0) {
+    let finalEvents = events;
+    if (!fresh || finalEvents.length === 0) {
+      // Fallback: el snapshot está vacío o tiene más de 7h → llamar a la API directamente
+      console.warn(`[send-picks] Snapshot no disponible (age=${snapshotAge}min). Llamando a The Odds API...`);
+      finalEvents = await getUpcomingMatches('upcoming');
+    } else {
+      console.log(`[send-picks] ✅ Usando snapshot (${snapshotAge}min antigüedad, ${finalEvents.length} eventos). Sin consumo de API.`);
+    }
+
+    if (finalEvents.length === 0) {
       console.log('[send-picks] Sin eventos disponibles hoy');
       return NextResponse.json({ ok: true, skipped: true, reason: 'No events available' });
     }
 
     // 3. Calcular los mejores picks del día (5-10, con filtro de calidad)
-    let topPicks = getTopDailyPicks(events, {
+    let topPicks = getTopDailyPicks(finalEvents, {
       minPicks:             5,
       maxPicks:             10,
       requireHighConfidence: false, // incluir también confianza media
