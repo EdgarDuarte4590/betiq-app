@@ -3,6 +3,7 @@ import { getUpcomingMatches } from '@/lib/apis/odds-api';
 import { getLatestEventsFromSnapshot } from '@/app/actions/snapshots';
 import { getTopDailyPicks, enrichPicksWithStats } from '@/lib/algorithms/value-bet-calculator';
 import { sendDailyPicksTelegram, sendPickAlertTelegram } from '@/lib/notifications/telegram';
+import { saveSentPicks } from '@/lib/store/sent-picks';
 import { createClient } from '@supabase/supabase-js';
 
 // ── Admin Supabase (para guardar los picks enviados y no repetir) ─────────────
@@ -63,6 +64,8 @@ async function logNotificationSent(picksCount: number): Promise<void> {
  *   4. Envía el digest completo por Telegram
  *   5. Si hay picks de alta confianza, envía también alertas individuales
  */
+export const maxDuration = 60;
+
 export async function GET(request: Request) {
   // Validar que venga del cron de Vercel
   const authHeader = request.headers.get('authorization');
@@ -96,11 +99,12 @@ export async function GET(request: Request) {
       return NextResponse.json({ ok: true, skipped: true, reason: 'No events available' });
     }
 
-    // 3. Calcular los mejores picks del día (5-10, con filtro de calidad)
+    // 3. Calcular los mejores picks del día (solo partidos de HOY, con filtro de calidad)
     let topPicks = getTopDailyPicks(finalEvents, {
-      minPicks:             5,
+      minPicks:             1,
       maxPicks:             10,
       requireHighConfidence: false, // incluir también confianza media
+      todayOnly:            true,  // solo partidos que se juegan hoy (zona horaria México)
     });
 
     if (topPicks.length === 0) {
@@ -134,6 +138,9 @@ export async function GET(request: Request) {
 
     // 6. Registrar en BD
     await logNotificationSent(topPicks.length);
+
+    // 7. Guardar picks enviados en sent_picks para deduplicación con alertas intra-día
+    await saveSentPicks(topPicks, 'daily_digest');
 
     return NextResponse.json({
       ok:           true,

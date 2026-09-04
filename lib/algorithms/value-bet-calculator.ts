@@ -131,6 +131,17 @@ export function isMainSport(sportKey: string): boolean {
   return MAIN_SPORTS.some(s => sportKey.includes(s));
 }
 
+/**
+ * Verifica si un evento se juega hoy en zona horaria de México (CST).
+ * Compara la fecha del commence_time con la fecha actual en America/Mexico_City.
+ */
+export function isTodayInMexico(commenceTime: string): boolean {
+  const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Mexico_City' });
+  const todayStr = formatter.format(new Date());
+  const eventStr = formatter.format(new Date(commenceTime));
+  return eventStr === todayStr;
+}
+
 // ========== HELPERS DE MERCADOS ==========
 
 interface ParsedMarketPick {
@@ -767,9 +778,10 @@ export async function enrichPicksWithStats(picks: SmartPick[]): Promise<SmartPic
 // ========== PICKS DIARIOS CON FILTRO DE CALIDAD ==========
 
 export interface DailyPicksConfig {
-  minPicks?: number;  // Mínimo de picks a mostrar (default: 5)
+  minPicks?: number;  // Mínimo de picks a mostrar (default: 1)
   maxPicks?: number;  // Máximo de picks a mostrar (default: 10)
   requireHighConfidence?: boolean; // Si true, solo 'alta'. Default: false (alta + media)
+  todayOnly?: boolean; // Si true, solo partidos de hoy (zona horaria México). Default: true
 }
 
 /**
@@ -800,13 +812,19 @@ export function getTopDailyPicks(
   config: DailyPicksConfig = {}
 ): SmartPick[] {
   const {
-    minPicks = 5,
+    minPicks = 1,
     maxPicks = 10,
     requireHighConfidence = false,
+    todayOnly = true,
   } = config;
 
+  // Filtrar eventos por fecha si todayOnly está activo
+  const filteredEvents = todayOnly
+    ? events.filter(e => isTodayInMexico(e.commence_time))
+    : events;
+
   // Obtener todos los smart picks con el filtro de zonas ya aplicado
-  const allPicks = getSmartPicks(events, true);
+  const allPicks = getSmartPicks(filteredEvents, true);
 
   // Separar por calidad (Solo de los recomendados)
   const highQuality = allPicks.filter(p =>
@@ -827,8 +845,9 @@ export function getTopDailyPicks(
   // Tomar hasta maxPicks de alta calidad
   let result = sortedHigh.slice(0, maxPicks);
 
-  // Si quedamos por debajo del mínimo, completar con picks de calidad baja
-  if (result.length < minPicks) {
+  // Si todayOnly está activo, no forzar el mínimo (enviar lo que haya de hoy)
+  // Si todayOnly está desactivado (web), completar con baja calidad hasta minPicks
+  if (!todayOnly && result.length < minPicks) {
     const needed = minPicks - result.length;
     result = [...result, ...sortedLow.slice(0, needed)];
   }

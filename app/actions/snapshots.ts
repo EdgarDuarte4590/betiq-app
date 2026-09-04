@@ -1,11 +1,11 @@
 'use server';
-import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
 import { OddEvent, Bookmaker, Market, Outcome } from '@/lib/apis/odds-api';
 
 const SNAPSHOT_INTERVAL_MS = 5 * 60 * 60 * 1000; // 5 horas
 
 export async function saveOddsSnapshot(events: OddEvent[]) {
-  const supabase = await createClient();
+  const supabase = createAdminClient();
   const now = new Date();
 
   // ── Rate-limit: solo guardar si no hay snapshot reciente (< 5h) ──
@@ -29,7 +29,16 @@ export async function saveOddsSnapshot(events: OddEvent[]) {
   }
 
   const nowIso = now.toISOString();
-  const rows = events.flatMap(event =>
+  const maxFutureMs = 72 * 60 * 60 * 1000; // Solo partidos de los próximos 3 días (72h)
+  const nowMs = now.getTime();
+
+  // Filtrar eventos que no sean lejanos (ej. semanas adelante) para reducir peso y tiempo
+  const relevantEvents = events.filter(e => {
+    const eventTime = new Date(e.commence_time).getTime();
+    return eventTime >= nowMs && (eventTime - nowMs) <= maxFutureMs;
+  });
+
+  const rows = relevantEvents.flatMap(event =>
     event.bookmakers.flatMap(bk =>
       (bk.markets ?? []).flatMap(market =>
         (market.outcomes ?? []).map(outcome => ({
@@ -41,6 +50,7 @@ export async function saveOddsSnapshot(events: OddEvent[]) {
           outcome_name: outcome.name,
           odds: outcome.price,
           recorded_at: nowIso,
+          commence_time: event.commence_time,
         }))
       )
     )
@@ -48,10 +58,21 @@ export async function saveOddsSnapshot(events: OddEvent[]) {
 
   if (rows.length === 0) return;
 
-  // Upsert para no duplicar si se llama varias veces en la misma hora
-  await supabase
-    .from('odds_snapshots')
-    .upsert(rows, { onConflict: 'event_id,bookmaker_key,market_key,outcome_name,recorded_at' });
+  // Inserción en lotes paralelos (chunks) ultra-rápida
+  const CHUNK_SIZE = 500;
+  console.log(`[Snapshots] Guardando ${rows.length} registros en lotes de ${CHUNK_SIZE}...`);
+  const chunks: typeof rows[] = [];
+  for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+    chunks.push(rows.slice(i, i + CHUNK_SIZE));
+  }
+
+  // Ejecutar inserciones en paralelo para terminar en 1-2 segundos
+  await Promise.all(
+    chunks.map(chunk =>
+      supabase.from('odds_snapshots').insert(chunk)
+    )
+  );
+  console.log('[Snapshots] ✅ Snapshot guardado exitosamente.');
 }
 
 /**
@@ -69,7 +90,7 @@ export async function getLatestEventsFromSnapshot(): Promise<{
   snapshotAge: number | null; // minutos desde el último snapshot
 }> {
   try {
-    const supabase = await createClient();
+    const supabase = createAdminClient();
     const sevenHoursAgo = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString();
 
     // 1. Verificar que hay un snapshot reciente
@@ -96,7 +117,7 @@ export async function getLatestEventsFromSnapshot(): Promise<{
     // 2. Leer todas las filas del snapshot más reciente (misma recorded_at)
     const { data: rows, error } = await supabase
       .from('odds_snapshots')
-      .select('event_id, event_label, sport_key, bookmaker_key, market_key, outcome_name, odds, recorded_at')
+      .select('event_id, event_label, sport_key, bookmaker_key, market_key, outcome_name, odds, recorded_at, commence_time')
       .gte('recorded_at', sevenHoursAgo)
       .order('recorded_at', { ascending: false });
 
@@ -116,7 +137,7 @@ export async function getLatestEventsFromSnapshot(): Promise<{
           id:            row.event_id,
           sport_key:     row.sport_key,
           sport_title:   row.sport_key,  // título exacto no disponible en el snapshot
-          commence_time: latestRow.recorded_at, // aproximado
+          commence_time: row.commence_time ?? latestRow.recorded_at, // usar fecha real del partido
           home_team:     homeTeam?.trim() ?? '',
           away_team:     awayTeam?.trim() ?? '',
           bookmakers:    [],

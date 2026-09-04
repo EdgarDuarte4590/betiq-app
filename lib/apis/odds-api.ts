@@ -141,7 +141,7 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
   try {
     const fetchPromises = targetSports.map(async (s) => {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
       const url = `https://api.the-odds-api.com/v4/sports/${s}/odds?apiKey=${API_KEY}&regions=eu,us,uk,au&markets=h2h,totals&oddsFormat=decimal`;
 
       const response = await fetch(url, {

@@ -169,6 +169,51 @@ export function buildAlertMessage(pick: SmartPick): string {
   ].join('\n');
 }
 
+/**
+ * Construye mensaje de alerta pre-partido (oportunidad detectada intra-día).
+ * Incluye el tiempo estimado hasta que empiece el partido.
+ */
+export function buildPreGameAlertMessage(pick: SmartPick): string {
+  const icon      = getSportIcon(pick.sport);
+  const time      = formatMatchTime(pick.commenceTime);
+  const confEmoji = getConfidenceEmoji(pick.confidence);
+  const valueStr  = pick.valuePercentage > 0 ? `+${pick.valuePercentage.toFixed(1)}%` : 'N/A';
+  const kellyStr  = pick.kellyStake > 0 ? `${pick.kellyStake.toFixed(1)}% bankroll` : '—';
+  const pinnacle  = pick.pinnacleAligns ? ' ✅ Sharp' : '';
+
+  // Calcular tiempo restante hasta el partido
+  const diffMs   = new Date(pick.commenceTime).getTime() - Date.now();
+  const diffMins = Math.round(diffMs / 60_000);
+  let timeLeft   = '';
+  if (diffMins > 0) {
+    const hours = Math.floor(diffMins / 60);
+    const mins  = diffMins % 60;
+    timeLeft = hours > 0 ? `~${hours}h ${mins}min` : `~${mins}min`;
+  }
+
+  const lines: string[] = [
+    `🚨 BetIQ — Oportunidad Detectada`,
+    '',
+    `${icon} ${pick.event}`,
+    `📌 ${pick.bestPick} (${pick.bestMarket})`,
+    `💰 Cuota: ${pick.bestOdds.toFixed(2)} (${pick.oddsRange})`,
+    `📊 Value: ${valueStr} | Kelly: ${kellyStr}${pinnacle}`,
+    `${confEmoji} Confianza: ${pick.confidence.toUpperCase()}`,
+    `⏰ ${time} | ${pick.league}`,
+  ];
+
+  if (timeLeft) {
+    lines.push(`⏳ Empieza en ${timeLeft}`);
+  }
+
+  lines.push('');
+  lines.push('💡 Esta oportunidad no estaba en el digest de esta mañana.');
+  lines.push('');
+  lines.push('BetIQ v3.1 — Apostar responsablemente.');
+
+  return lines.join('\n');
+}
+
 // ── Envío ────────────────────────────────────────────────────────────────────
 
 interface TelegramResult {
@@ -293,6 +338,15 @@ export async function sendPickAlertTelegram(pick: SmartPick): Promise<TelegramRe
   console.log(`[Telegram] 🚨 Enviando alerta de pick: ${pick.event}`);
   const message = buildAlertMessage(pick);
   return sendTelegramMessage(message, 'MarkdownV2');
+}
+
+/**
+ * Envía una alerta pre-partido por Telegram (texto plano para simplicidad).
+ */
+export async function sendPreGameAlertTelegram(pick: SmartPick): Promise<TelegramResult> {
+  console.log(`[Telegram] 🚨 Enviando alerta pre-partido: ${pick.event}`);
+  const message = buildPreGameAlertMessage(pick);
+  return sendTelegramMessage(message, null); // texto plano para evitar problemas de parseo
 }
 
 /**

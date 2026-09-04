@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { syncAllPendingBets } from '@/app/actions/syncScores';
 
+export const maxDuration = 60;
+
 // Vercel Cron: ejecuta cada 3 horas para auto-gradear apuestas pendientes.
 export async function GET(request: Request) {
   const authHeader = request.headers.get('authorization');

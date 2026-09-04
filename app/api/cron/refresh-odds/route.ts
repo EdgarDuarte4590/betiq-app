@@ -2,7 +2,10 @@ import { NextResponse } from 'next/server';
 import { getUpcomingMatches } from '@/lib/apis/odds-api';
 import { saveOddsSnapshot } from '@/app/actions/snapshots';
 
-// Vercel Cron: ejecuta cada 6 horas para mantener el snapshot de odds actualizado.
+// Permitir hasta 60s de ejecución en Vercel para evitar cortes prematuros
+export const maxDuration = 60;
+
+// Vercel Cron / cron-job.org: ejecuta para mantener el snapshot de odds actualizado.
 // El rate-limit interno de saveOddsSnapshot evita duplicados si se llama más seguido.
 export async function GET(request: Request) {
   // Validar que venga de Vercel Cron (en producción)
