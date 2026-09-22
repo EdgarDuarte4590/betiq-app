@@ -30,42 +30,82 @@ export interface Outcome {
 
 // ========== CALENDARIO DINÁMICO DE LIGAS ==========
 
-interface SportSchedule {
-  key: string;          // sport_key de The Odds API
-  label: string;        // Nombre legible
-  activeFrom?: string;  // ISO date YYYY-MM-DD — null = activa desde siempre
-  activeUntil?: string; // ISO date YYYY-MM-DD — null = sin fecha de fin
+interface PauseWindow {
+  from: string;    // ISO date YYYY-MM-DD — inicio del parón (inclusive)
+  until: string;   // ISO date YYYY-MM-DD — fin del parón (inclusive, último día sin juegos)
+  reason?: string; // Descripción opcional (ej. "Parón FIFA sep-oct 2026")
 }
+
+interface SportSchedule {
+  key: string;           // sport_key de The Odds API
+  label: string;         // Nombre legible
+  activeFrom?: string;   // ISO date YYYY-MM-DD — null = activa desde siempre
+  activeUntil?: string;  // ISO date YYYY-MM-DD — null = sin fecha de fin
+  pauseWindows?: PauseWindow[]; // Períodos de pausa intermedios (parones, etc.)
+}
+
+/**
+ * Parones FIFA 2026-27 compartidos por las ligas europeas y la Champions.
+ * Para agregar futuros parones, solo hay que añadir una entrada aquí.
+ *
+ * Ligas americanas (MLS, Brasileirão, Argentina) NO usan estas pausas
+ * porque no paran durante la fecha FIFA.
+ */
+const FIFA_INTERNATIONAL_BREAKS: PauseWindow[] = [
+  { from: '2026-09-21', until: '2026-10-09', reason: 'Parón FIFA sep-oct 2026' },
+  { from: '2026-11-09', until: '2026-11-20', reason: 'Parón FIFA nov 2026' },
+];
 
 /**
  * Calendario oficial de competiciones.
  * Actualizar las fechas cuando comiencen nuevas temporadas.
  * El sistema filtra automáticamente cuáles están activas hoy.
+ *
+ * Ligas con pauseWindows se suspenden automáticamente durante esos períodos.
+ * Las ligas sin pauseWindows corren de forma continua.
  */
 export const SPORT_SCHEDULE: SportSchedule[] = [
   // ── Fútbol: Copa del Mundo 2026 ──
   { key: 'soccer_fifa_world_cup',      label: '🏆 Copa del Mundo 2026',       activeUntil: '2026-07-19' },
   // ── Béisbol ──
-  { key: 'baseball_mlb',               label: '⚾ MLB Temporada Regular',      activeFrom: '2026-03-20', activeUntil: '2026-10-31' },
+  { key: 'baseball_mlb',               label: '⚾ MLB (Temporada + Playoffs)', activeFrom: '2026-03-20', activeUntil: '2026-10-31' },
   // ── Baloncesto ──
   { key: 'basketball_nba',             label: '🏀 NBA Temporada Regular',      activeFrom: '2026-10-01', activeUntil: '2027-06-30' },
-  // ── Fútbol: Ligas América ──
+  // ── Fútbol: Ligas América — sin parón FIFA ──
   { key: 'soccer_usa_mls',             label: '⚽ MLS',                        activeFrom: '2026-02-20', activeUntil: '2026-12-15' },
   { key: 'soccer_brazil_campeonato',   label: '⚽ Brasileirão',                activeFrom: '2026-04-01', activeUntil: '2026-12-07' },
   { key: 'soccer_argentina_primera',   label: '⚽ Liga Argentina',             activeFrom: '2026-02-01', activeUntil: '2026-12-20' },
-  // ── Fútbol: Top 5 Ligas Europeas (temporada 2026-27) ──
-  { key: 'soccer_epl',                 label: '⚽ Premier League',             activeFrom: '2026-08-08' },
-  { key: 'soccer_spain_la_liga',       label: '⚽ La Liga',                    activeFrom: '2026-08-15' },
-  { key: 'soccer_germany_bundesliga',  label: '⚽ Bundesliga',                 activeFrom: '2026-08-14' },
-  { key: 'soccer_italy_serie_a',       label: '⚽ Serie A',                    activeFrom: '2026-08-22' },
-  { key: 'soccer_france_ligue_one',    label: '⚽ Ligue 1',                    activeFrom: '2026-08-08' },
-  // ── Champions League ──
-  { key: 'soccer_uefa_champs_league',  label: '⚽ UEFA Champions League',      activeFrom: '2026-07-08' },
+  // ── Fútbol: Top 5 Ligas Europeas — pausan en parón FIFA ──
+  { key: 'soccer_epl',                 label: '⚽ Premier League',             activeFrom: '2026-08-08', pauseWindows: FIFA_INTERNATIONAL_BREAKS },
+  { key: 'soccer_spain_la_liga',       label: '⚽ La Liga',                    activeFrom: '2026-08-15', pauseWindows: FIFA_INTERNATIONAL_BREAKS },
+  { key: 'soccer_germany_bundesliga',  label: '⚽ Bundesliga',                 activeFrom: '2026-08-14', pauseWindows: FIFA_INTERNATIONAL_BREAKS },
+  { key: 'soccer_italy_serie_a',       label: '⚽ Serie A',                    activeFrom: '2026-08-22', pauseWindows: FIFA_INTERNATIONAL_BREAKS },
+  { key: 'soccer_france_ligue_one',    label: '⚽ Ligue 1',                    activeFrom: '2026-08-08', pauseWindows: FIFA_INTERNATIONAL_BREAKS },
+  // ── Champions League — también pausa en parón FIFA ──
+  { key: 'soccer_uefa_champs_league',  label: '⚽ UEFA Champions League',      activeFrom: '2026-07-08', pauseWindows: FIFA_INTERNATIONAL_BREAKS },
 ];
 
 /**
+ * Verifica si un deporte está actualmente en un período de pausa.
+ */
+function isInPauseWindow(sport: SportSchedule, today: string): boolean {
+  if (!sport.pauseWindows || sport.pauseWindows.length === 0) return false;
+  return sport.pauseWindows.some(w => today >= w.from && today <= w.until);
+}
+
+/**
+ * Retorna la ventana de pausa activa para un deporte, si existe.
+ */
+function getActivePauseWindow(sport: SportSchedule, today: string): PauseWindow | undefined {
+  if (!sport.pauseWindows) return undefined;
+  return sport.pauseWindows.find(w => today >= w.from && today <= w.until);
+}
+
+/**
  * Retorna los sport_keys que están activos en la fecha actual.
- * Compara con activeFrom y activeUntil del calendario.
+ * Un deporte es activo si:
+ *   1. Está dentro de su ventana activeFrom–activeUntil, Y
+ *   2. NO está en ninguna ventana de pausa (pauseWindows)
  */
 export function getActiveSports(referenceDate?: Date): string[] {
   const now = referenceDate ?? new Date();
@@ -73,23 +113,36 @@ export function getActiveSports(referenceDate?: Date): string[] {
 
   return SPORT_SCHEDULE
     .filter(sport => {
-      const fromOk  = !sport.activeFrom  || today >= sport.activeFrom;
-      const untilOk = !sport.activeUntil || today <= sport.activeUntil;
-      return fromOk && untilOk;
+      const fromOk    = !sport.activeFrom  || today >= sport.activeFrom;
+      const untilOk   = !sport.activeUntil || today <= sport.activeUntil;
+      const notPaused = !isInPauseWindow(sport, today);
+      return fromOk && untilOk && notPaused;
     })
     .map(sport => sport.key);
 }
 
 /**
- * Retorna todos los sports del calendario con su estado (activo/inactivo).
+ * Retorna todos los sports del calendario con su estado (activo/pausado/inactivo).
  * Útil para mostrar el estado en el dashboard.
  */
-export function getScheduleStatus(referenceDate?: Date): Array<SportSchedule & { isActive: boolean }> {
+export function getScheduleStatus(referenceDate?: Date): Array<SportSchedule & {
+  isActive: boolean;
+  isPaused: boolean;
+  pauseReason?: string;
+}> {
+  const now = referenceDate ?? new Date();
+  const today = now.toISOString().split('T')[0];
   const activeKeys = new Set(getActiveSports(referenceDate));
-  return SPORT_SCHEDULE.map(sport => ({
-    ...sport,
-    isActive: activeKeys.has(sport.key),
-  }));
+
+  return SPORT_SCHEDULE.map(sport => {
+    const pauseWindow = getActivePauseWindow(sport, today);
+    return {
+      ...sport,
+      isActive: activeKeys.has(sport.key),
+      isPaused: !!pauseWindow,
+      pauseReason: pauseWindow?.reason,
+    };
+  });
 }
 
 /**

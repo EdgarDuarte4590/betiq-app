@@ -60,6 +60,40 @@ function formatDate(): string {
   });
 }
 
+/**
+ * Detecta si un pick es de mercado de totales (Over/Under).
+ * Los picks de totales ya llevan el número embebido en bestPick: "Over 2.5", "Under 8.5"
+ */
+function isTotalsMarket(market: string): boolean {
+  return market === 'Over/Under';
+}
+
+/**
+ * Formatea la línea 📌 del pick para Telegram (MarkdownV2 escapado).
+ * - Totals (Over/Under): muestra solo el pick con el número, ej. "Over 2.5"
+ * - H2H / Empate: muestra "Gana Arsenal (H2H)" o "Empate"
+ */
+function formatPickLineMarkdown(bestPick: string, bestMarket: string): string {
+  if (isTotalsMarket(bestMarket)) {
+    // El número ya viene en bestPick ("Over 2.5", "Under 8.5")
+    // Escapar el punto para MarkdownV2
+    return bestPick.replace('.', '\\.');
+  }
+  // H2H / Empate — mostrar con mercado entre paréntesis
+  return `${bestPick} \\(${bestMarket}\\)`;
+}
+
+/**
+ * Formatea la línea 📌 del pick en texto plano (sin escape Markdown).
+ */
+function formatPickLinePlain(bestPick: string, bestMarket: string): string {
+  if (isTotalsMarket(bestMarket)) {
+    return bestPick; // "Over 2.5" o "Under 8.5"
+  }
+  return `${bestPick} (${bestMarket})`;
+}
+
+
 // ── Construcción del mensaje ─────────────────────────────────────────────────
 
 /**
@@ -86,7 +120,8 @@ export function buildDailyPicksMessage(picks: SmartPick[]): string {
     const pinnacle    = pick.pinnacleAligns ? ' ✅ Sharp' : '';
 
     lines.push(`*${i + 1}\\. ${icon} ${pick.event}*`);
-    lines.push(`📌 ${pick.bestPick} \\(${pick.bestMarket}\\)`);
+    lines.push(`📌 ${formatPickLineMarkdown(pick.bestPick, pick.bestMarket)}`);
+
     lines.push(`💰 Cuota: *${pick.bestOdds.toFixed(2)}* \\(${pick.oddsRange}\\)`);
     lines.push(`📊 Value: *${valueStr}* \\| Kelly: ${kellyStr}${pinnacle}`);
     lines.push(`${confEmoji} Confianza: *${pick.confidence.toUpperCase()}*`);
@@ -128,7 +163,7 @@ export function buildDailyPicksMessagePlain(picks: SmartPick[]): string {
     const pinnacle  = pick.pinnacleAligns ? ' ✅ Sharp' : '';
 
     lines.push(`${i + 1}. ${icon} ${pick.event}`);
-    lines.push(`📌 ${pick.bestPick} (${pick.bestMarket})`);
+    lines.push(`📌 ${formatPickLinePlain(pick.bestPick, pick.bestMarket)}`);
     lines.push(`💰 Cuota: ${pick.bestOdds.toFixed(2)} (${pick.oddsRange})`);
     lines.push(`📊 Value: ${valueStr} | Kelly: ${kellyStr}${pinnacle}`);
     lines.push(`${confEmoji} Confianza: ${pick.confidence.toUpperCase()}`);
@@ -159,7 +194,7 @@ export function buildAlertMessage(pick: SmartPick): string {
     `🚨 *BetIQ — Pick de Alta Confianza*`,
     '',
     `${icon} *${pick.event}*`,
-    `📌 ${pick.bestPick} \\(${pick.bestMarket}\\)`,
+    `📌 ${formatPickLineMarkdown(pick.bestPick, pick.bestMarket)}`,
     `💰 Cuota: *${pick.bestOdds.toFixed(2)}* en ${pick.oddsRange}`,
     `📊 Value: *${valueStr}* \\| Kelly: ${kellyStr}`,
     `🟢 Confianza: *ALTA*${pinnacle}`,
@@ -195,7 +230,7 @@ export function buildPreGameAlertMessage(pick: SmartPick): string {
     `🚨 BetIQ — Oportunidad Detectada`,
     '',
     `${icon} ${pick.event}`,
-    `📌 ${pick.bestPick} (${pick.bestMarket})`,
+    `📌 ${formatPickLinePlain(pick.bestPick, pick.bestMarket)}`,
     `💰 Cuota: ${pick.bestOdds.toFixed(2)} (${pick.oddsRange})`,
     `📊 Value: ${valueStr} | Kelly: ${kellyStr}${pinnacle}`,
     `${confEmoji} Confianza: ${pick.confidence.toUpperCase()}`,
