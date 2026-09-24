@@ -64,7 +64,9 @@ const FIFA_INTERNATIONAL_BREAKS: PauseWindow[] = [
  * Ligas con pauseWindows se suspenden automáticamente durante esos períodos.
  * Las ligas sin pauseWindows corren de forma continua.
  */
+
 export const SPORT_SCHEDULE: SportSchedule[] = [
+
   // ── Fútbol: Copa del Mundo 2026 ──
   { key: 'soccer_fifa_world_cup',      label: '🏆 Copa del Mundo 2026',       activeUntil: '2026-07-19' },
   // ── Béisbol ──
@@ -75,6 +77,17 @@ export const SPORT_SCHEDULE: SportSchedule[] = [
   { key: 'soccer_usa_mls',             label: '⚽ MLS',                        activeFrom: '2026-02-20', activeUntil: '2026-12-15' },
   { key: 'soccer_brazil_campeonato',   label: '⚽ Brasileirão',                activeFrom: '2026-04-01', activeUntil: '2026-12-07' },
   { key: 'soccer_argentina_primera',   label: '⚽ Liga Argentina',             activeFrom: '2026-02-01', activeUntil: '2026-12-20' },
+  { key: 'soccer_mexico_ligamx',       label: '⚽ Liga MX',                    activeFrom: '2026-01-01', activeUntil: '2026-12-31' },
+  // ── Fútbol: Copa Libertadores / Sudamericana ──
+  { key: 'soccer_conmebol_copa_libertadores',  label: '🏆 Copa Libertadores',  activeFrom: '2026-02-01', activeUntil: '2026-11-30' },
+  { key: 'soccer_conmebol_copa_sudamericana',  label: '🏆 Copa Sudamericana',  activeFrom: '2026-02-01', activeUntil: '2026-11-30' },
+  // ── UEFA Nations League — SOLO activa durante parones FIFA ──
+  // Usa activeFrom/activeUntil del primer parón; el segundo parón se maneja
+  // con la misma key pero necesita estar activa en ambas ventanas.
+  // Solución: activeFrom amplio + pauseWindows invertidas no es posible directamente,
+  // así que la dejamos siempre activa en su temporada — la API devuelve partidos
+  // solo cuando los hay, así que no gasta requests si no hay juegos.
+  { key: 'soccer_uefa_nations_league', label: '🌍 UEFA Nations League',        activeFrom: '2026-09-01', activeUntil: '2026-11-30' },
   // ── Fútbol: Top 5 Ligas Europeas — pausan en parón FIFA ──
   { key: 'soccer_epl',                 label: '⚽ Premier League',             activeFrom: '2026-08-08', pauseWindows: FIFA_INTERNATIONAL_BREAKS },
   { key: 'soccer_spain_la_liga',       label: '⚽ La Liga',                    activeFrom: '2026-08-15', pauseWindows: FIFA_INTERNATIONAL_BREAKS },
@@ -84,6 +97,7 @@ export const SPORT_SCHEDULE: SportSchedule[] = [
   // ── Champions League — también pausa en parón FIFA ──
   { key: 'soccer_uefa_champs_league',  label: '⚽ UEFA Champions League',      activeFrom: '2026-07-08', pauseWindows: FIFA_INTERNATIONAL_BREAKS },
 ];
+
 
 /**
  * Verifica si un deporte está actualmente en un período de pausa.
