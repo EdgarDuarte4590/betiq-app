@@ -47,7 +47,11 @@ export async function saveOddsSnapshot(events: OddEvent[]) {
           sport_key: event.sport_key,
           bookmaker_key: bk.key,
           market_key: market.key,
-          outcome_name: outcome.name,
+          // La tabla no tiene columna `point`: codificamos la línea de totales
+          // en el nombre ("Over 8.5") para no mezclar líneas distintas entre casas.
+          outcome_name: outcome.point !== undefined && outcome.point !== null
+            ? `${outcome.name} ${outcome.point}`
+            : outcome.name,
           odds: outcome.price,
           recorded_at: nowIso,
           commence_time: event.commence_time,
@@ -91,7 +95,6 @@ export async function getLatestEventsFromSnapshot(): Promise<{
 }> {
   try {
     const supabase = createAdminClient();
-    const sevenHoursAgo = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString();
 
     // 1. Verificar que hay un snapshot reciente
     const { data: latestRow } = await supabase
@@ -114,15 +117,30 @@ export async function getLatestEventsFromSnapshot(): Promise<{
       return { events: [], fresh: false, snapshotAge: snapshotAgeMins };
     }
 
-    // 2. Leer todas las filas del snapshot más reciente (misma recorded_at)
-    const { data: rows, error } = await supabase
-      .from('odds_snapshots')
-      .select('event_id, event_label, sport_key, bookmaker_key, market_key, outcome_name, odds, recorded_at, commence_time')
-      .gte('recorded_at', sevenHoursAgo)
-      .order('recorded_at', { ascending: false });
+    // 2. Leer TODAS las filas del snapshot más reciente (misma recorded_at).
+    //    Supabase limita cada query a 1000 filas → hay que paginar, si no se
+    //    pierden ligas enteras cuando el snapshot es grande (MLB, Nations League...).
+    const PAGE_SIZE = 1000;
+    const rows: any[] = [];
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const { data: page, error } = await supabase
+        .from('odds_snapshots')
+        .select('event_id, event_label, sport_key, bookmaker_key, market_key, outcome_name, odds, recorded_at, commence_time')
+        .eq('recorded_at', latestRow.recorded_at)
+        .order('id', { ascending: true })
+        .range(from, from + PAGE_SIZE - 1);
 
-    if (error || !rows || rows.length === 0) {
-      console.warn('[Snapshots] Sin filas en el rango de 7h:', error?.message);
+      if (error) {
+        console.warn('[Snapshots] Error paginando snapshot:', error.message);
+        break;
+      }
+      if (!page || page.length === 0) break;
+      rows.push(...page);
+      if (page.length < PAGE_SIZE) break;
+    }
+
+    if (rows.length === 0) {
+      console.warn('[Snapshots] Sin filas en el snapshot más reciente');
       return { events: [], fresh: false, snapshotAge: snapshotAgeMins };
     }
 
@@ -160,10 +178,23 @@ export async function getLatestEventsFromSnapshot(): Promise<{
         bk.markets.push(market);
       }
 
-      // Agregar outcome (evitar duplicados)
-      const alreadyExists = market.outcomes.some(o => o.name === row.outcome_name);
+      // Decodificar línea de totales: "Over 8.5" → { name: 'Over', point: 8.5 }
+      let outcomeName: string = row.outcome_name;
+      let point: number | undefined;
+      if (row.market_key === 'totals') {
+        const m = /^(Over|Under)\s+(-?\d+(?:\.\d+)?)$/.exec(outcomeName);
+        if (m) {
+          outcomeName = m[1];
+          point = parseFloat(m[2]);
+        }
+      }
+
+      // Agregar outcome (evitar duplicados por nombre + línea)
+      const alreadyExists = market.outcomes.some(o => o.name === outcomeName && o.point === point);
       if (!alreadyExists) {
-        market.outcomes.push({ name: row.outcome_name, price: row.odds } as Outcome);
+        const outcome: Outcome = { name: outcomeName, price: row.odds };
+        if (point !== undefined) outcome.point = point;
+        market.outcomes.push(outcome);
       }
     }
 

@@ -26,6 +26,7 @@ export interface Market {
 export interface Outcome {
   name: string;
   price: number;
+  point?: number; // Línea del mercado de totales (ej. 2.5, 8.5)
 }
 
 // ========== CALENDARIO DINÁMICO DE LIGAS ==========
@@ -76,7 +77,7 @@ export const SPORT_SCHEDULE: SportSchedule[] = [
   // ── Fútbol: Ligas América — sin parón FIFA ──
   { key: 'soccer_usa_mls',             label: '⚽ MLS',                        activeFrom: '2026-02-20', activeUntil: '2026-12-15' },
   { key: 'soccer_brazil_campeonato',   label: '⚽ Brasileirão',                activeFrom: '2026-04-01', activeUntil: '2026-12-07' },
-  { key: 'soccer_argentina_primera',   label: '⚽ Liga Argentina',             activeFrom: '2026-02-01', activeUntil: '2026-12-20' },
+  { key: 'soccer_argentina_primera_division', label: '⚽ Liga Argentina',     activeFrom: '2026-02-01', activeUntil: '2026-12-20' },
   { key: 'soccer_mexico_ligamx',       label: '⚽ Liga MX',                    activeFrom: '2026-01-01', activeUntil: '2026-12-31' },
   // ── Fútbol: Copa Libertadores / Sudamericana ──
   { key: 'soccer_conmebol_copa_libertadores',  label: '🏆 Copa Libertadores',  activeFrom: '2026-02-01', activeUntil: '2026-11-30' },
