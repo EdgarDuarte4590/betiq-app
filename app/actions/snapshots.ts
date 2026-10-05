@@ -127,7 +127,13 @@ export async function getLatestEventsFromSnapshot(): Promise<{
         .from('odds_snapshots')
         .select('event_id, event_label, sport_key, bookmaker_key, market_key, outcome_name, odds, recorded_at, commence_time')
         .eq('recorded_at', latestRow.recorded_at)
-        .order('id', { ascending: true })
+        // OJO: NO ordenar por `id` → Postgres recorre todo el índice PK de la
+        // tabla (millones de filas) y da "statement timeout". Ordenar por la
+        // clave natural del snapshot es rápido y determinista para paginar.
+        .order('event_id', { ascending: true })
+        .order('bookmaker_key', { ascending: true })
+        .order('market_key', { ascending: true })
+        .order('outcome_name', { ascending: true })
         .range(from, from + PAGE_SIZE - 1);
 
       if (error) {
