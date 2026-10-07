@@ -352,6 +352,28 @@ async function sendTelegramMessage(
 }
 
 /**
+ * Envía un mensaje avisando que no hay picks con suficiente valor hoy.
+ */
+export async function sendNoPicksTelegram(eventsCount: number): Promise<TelegramResult> {
+  const dateStr = formatDate();
+  
+  // Escapar caracteres reservados de MarkdownV2
+  const escapeMd = (str: string) => str.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+  const escapedDate = escapeMd(dateStr);
+  
+  const text = `🤖 *BetIQ Diario* \\- ${escapedDate}\n\n`
+             + `Hoy analizamos *${eventsCount}* partidos, pero ninguno cumple con los filtros de calidad y valor\\. 📉\n\n`
+             + `_Guarda tu bankroll para mejores oportunidades\\._ 💰`;
+
+  const plainText = `🤖 BetIQ Diario - ${dateStr}\n\n`
+                  + `Hoy analizamos ${eventsCount} partidos, pero ninguno cumple con los filtros de calidad y valor. 📉\n\n`
+                  + `Guarda tu bankroll para mejores oportunidades. 💰`;
+
+  console.log(`[Telegram] 📤 Enviando aviso de sin picks (analizados ${eventsCount})...`);
+  return sendTelegramMessage(text, 'MarkdownV2', plainText);
+}
+
+/**
  * Envía el resumen diario de picks a Telegram.
  */
 export async function sendDailyPicksTelegram(picks: SmartPick[]): Promise<TelegramResult> {

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { getUpcomingMatches } from '@/lib/apis/odds-api';
 import { getLatestEventsFromSnapshot } from '@/app/actions/snapshots';
 import { getTopDailyPicks, enrichPicksWithStats } from '@/lib/algorithms/value-bet-calculator';
-import { sendDailyPicksTelegram, sendPickAlertTelegram } from '@/lib/notifications/telegram';
+import { sendDailyPicksTelegram, sendPickAlertTelegram, sendNoPicksTelegram } from '@/lib/notifications/telegram';
 import { saveSentPicks } from '@/lib/store/sent-picks';
 import { createClient } from '@supabase/supabase-js';
 
@@ -108,8 +108,18 @@ export async function GET(request: Request) {
     });
 
     if (topPicks.length === 0) {
-      console.log('[send-picks] Sin picks de calidad suficiente hoy');
-      return NextResponse.json({ ok: true, skipped: true, reason: 'No quality picks today' });
+      console.log('[send-picks] Sin picks de calidad suficiente hoy. Enviando aviso...');
+      const telegramResult = await sendNoPicksTelegram(finalEvents.length);
+      
+      // Registrar de todos modos para que ya no envíe en el día
+      await logNotificationSent(0);
+
+      return NextResponse.json({ 
+        ok: true, 
+        picksFound: 0, 
+        digestSent: telegramResult.ok, 
+        reason: 'No quality picks today' 
+      });
     }
 
     // 3.5 Enriquecer picks con APIs externas (SofaScore)
