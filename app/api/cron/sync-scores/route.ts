@@ -3,10 +3,21 @@ import { syncAllPendingBets } from '@/app/actions/syncScores';
 
 export const maxDuration = 60;
 
-// Vercel Cron: ejecuta cada 3 horas para auto-gradear apuestas pendientes.
-export async function GET(request: Request) {
+function isAuthorizedCron(request: Request): boolean {
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret) return true;
+
   const authHeader = request.headers.get('authorization');
-  if (process.env.CRON_SECRET && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (authHeader === `Bearer ${cronSecret}`) return true;
+
+  const url = new URL(request.url);
+  if (url.searchParams.get('secret') === cronSecret) return true;
+
+  return false;
+}
+
+export async function GET(request: Request) {
+  if (!isAuthorizedCron(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 

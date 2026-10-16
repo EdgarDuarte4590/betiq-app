@@ -186,8 +186,9 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
   }
 
   // Obtener la key activa del pool de rotación
-  const API_KEY = await getActiveKey();
-  if (!API_KEY) {
+  const excludedKeys = new Set<string>();
+  let currentKey = await getActiveKey(excludedKeys);
+  if (!currentKey) {
     console.error('[OddsAPI] 🚫 No hay API keys disponibles. Todas agotadas o no configuradas.');
     return [];
   }
@@ -195,7 +196,6 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
   // Determinar qué sports consultar
   let targetSports: string[];
   if (sport === 'upcoming') {
-    // Usar el calendario dinámico: solo sports activos hoy
     targetSports = getActiveSports();
     if (targetSports.length === 0) {
       console.warn('[OddsAPI] ⚠️ No hay sports activos en el calendario hoy. Verifica SPORT_SCHEDULE.');
@@ -206,48 +206,65 @@ export async function getUpcomingMatches(sport: string = 'upcoming'): Promise<Od
     targetSports = [sport];
   }
 
-  try {
-    const fetchPromises = targetSports.map(async (s) => {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
-      const url = `https://api.the-odds-api.com/v4/sports/${s}/odds?apiKey=${API_KEY}&regions=eu,us,uk,au&markets=h2h,totals&oddsFormat=decimal`;
+  const fetchSportWithRetry = async (s: string, keyToUse: string, isRetry: boolean = false): Promise<OddEvent[]> => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    // Incluir eu,uk,us,au para capturar Pinnacle, Betfair Exchange, Matchbook y casas recreativas
+    const url = `https://api.the-odds-api.com/v4/sports/${s}/odds?apiKey=${keyToUse}&regions=eu,uk,us,au&markets=h2h,totals&oddsFormat=decimal`;
 
+    try {
       const response = await fetch(url, {
         signal: controller.signal,
-        next: { revalidate: 21600 }, // 6 horas
+        next: { revalidate: 3600 }, // 1 hora de caché ISR
       });
       clearTimeout(timeoutId);
 
       // Registrar uso de la key con los headers exactos de la respuesta
-      await recordKeyUsage(API_KEY, response.headers);
+      await recordKeyUsage(keyToUse, response.headers);
 
       if (!response.ok) {
         const used      = response.headers.get('x-requests-used');
         const remaining = response.headers.get('x-requests-remaining');
         console.error(`[OddsAPI] Falla al obtener ${s}. Código: ${response.status}. Usados: ${used}, Restantes: ${remaining}`);
 
-        // Si es error de autenticación o rate limit, marcar key como agotada
-        if (response.status === 401 || response.status === 429) {
-          await markKeyExhausted(API_KEY);
-          console.warn(`[OddsAPI] ⚠️ Key marcada como agotada por error ${response.status}. El próximo cron usará la siguiente key.`);
+        // Rotar ante 401 (Unauthorized / Out of usage credits), 402 (Payment Required) o 429 (Rate limit)
+        if (response.status === 401 || response.status === 402 || response.status === 429) {
+          await markKeyExhausted(keyToUse, response.status);
+          excludedKeys.add(keyToUse);
+          if (!isRetry) {
+            const nextKey = await getActiveKey(excludedKeys);
+            if (nextKey) {
+              currentKey = nextKey;
+              console.log(`[OddsAPI] 🔄 Reintentando ${s} con siguiente API key disponible...`);
+              return fetchSportWithRetry(s, nextKey, true);
+            }
+          }
         }
         return [];
       }
-      return await response.json();
-    });
 
-    const results = await Promise.all(fetchPromises);
-    // Flatten array of arrays
+      const data = await response.json();
+      return Array.isArray(data) ? data : [];
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      console.warn(`[OddsAPI] ⚠️ Error/timeout obteniendo liga ${s} (aislado):`, err?.message || err);
+      return [];
+    }
+  };
+
+  try {
+    const results = await Promise.all(
+      targetSports.map(s => fetchSportWithRetry(s, currentKey!))
+    );
     const allEvents: OddEvent[] = results.flat();
 
-    // Guardamos las respuestas en el archivo mock para que la próxima vez no gaste cuotas en local
+    // Guardamos las respuestas en el archivo mock para desarrollo local
     if (process.env.NODE_ENV === 'development' && allEvents.length > 0) {
       try {
         const fs = await import('fs');
         const path = await import('path');
         const mockPath = path.join(process.cwd(), 'lib', 'apis', 'odds-mock.json');
         fs.writeFileSync(mockPath, JSON.stringify(allEvents, null, 2));
-        console.log('[OddsAPI] 💾 Guardado odds-mock.json exitosamente para futuras pruebas locales');
       } catch (e) {
         console.error('[OddsAPI] Error al guardar mock data:', e);
       }

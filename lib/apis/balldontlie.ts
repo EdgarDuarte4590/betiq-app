@@ -28,27 +28,33 @@ export interface NBATeamRecord {
  */
 export async function searchNBATeam(teamName: string): Promise<NBATeam | null> {
   if (!API_KEY) return null;
-  
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2800);
+
   try {
     const res = await fetch(`${BASE_URL}/teams`, {
       headers: { 'Authorization': API_KEY },
+      signal: controller.signal,
       next: { revalidate: 86400 } // Cachear por 24h
     });
-    
+    clearTimeout(timeoutId);
+
     if (!res.ok) return null;
-    
+
     const data = await res.json();
-    const teams: NBATeam[] = data.data;
-    
+    const teams: NBATeam[] = data?.data || [];
+
     // Buscar coincidencia parcial (ej. "Lakers" en "Los Angeles Lakers")
-    const match = teams.find(t => 
-      t.full_name.toLowerCase().includes(teamName.toLowerCase()) || 
+    const match = teams.find(t =>
+      t.full_name.toLowerCase().includes(teamName.toLowerCase()) ||
       t.name.toLowerCase() === teamName.toLowerCase()
     );
-    
+
     return match || null;
-  } catch (error) {
-    console.error('[BallDontLie] Error buscando equipo:', error);
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    console.warn('[BallDontLie] Error o timeout buscando equipo (degradación elegante):', error?.message || error);
     return null;
   }
 }

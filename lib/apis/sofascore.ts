@@ -15,6 +15,9 @@ export interface TeamForm {
 export async function getTeamForm(teamName: string): Promise<TeamForm | null> {
   if (!API_KEY) return null;
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2800);
+
   try {
     // 1. Buscar el equipo por nombre
     const searchUrl = `https://${HOST}/api/sofascore/v1/search/all?q=${encodeURIComponent(teamName)}`;
@@ -23,13 +26,20 @@ export async function getTeamForm(teamName: string): Promise<TeamForm | null> {
         'x-rapidapi-key': API_KEY,
         'x-rapidapi-host': HOST
       },
+      signal: controller.signal,
       next: { revalidate: 86400 } // Cachear resultados de búsqueda 24h
     });
 
-    if (!searchRes.ok) return null;
+    if (!searchRes.ok) {
+      clearTimeout(timeoutId);
+      return null;
+    }
     
     const searchData = await searchRes.json();
-    if (!searchData || searchData.length === 0 || !searchData[0].entity) return null;
+    if (!searchData || searchData.length === 0 || !searchData[0]?.entity) {
+      clearTimeout(timeoutId);
+      return null;
+    }
 
     const teamId = searchData[0].entity.id;
     
@@ -40,13 +50,15 @@ export async function getTeamForm(teamName: string): Promise<TeamForm | null> {
         'x-rapidapi-key': API_KEY,
         'x-rapidapi-host': HOST
       },
+      signal: controller.signal,
       next: { revalidate: 21600 } // Cachear racha reciente por 6 horas
     });
+    clearTimeout(timeoutId);
 
     if (!formRes.ok) return null;
     
     const formData = await formRes.json();
-    if (!formData.events || formData.events.length === 0) return null;
+    if (!formData?.events || formData.events.length === 0) return null;
 
     // Calcular el % de victorias en los últimos 5 partidos
     const recentEvents = formData.events.slice(0, 5);
@@ -54,8 +66,8 @@ export async function getTeamForm(teamName: string): Promise<TeamForm | null> {
 
     for (const event of recentEvents) {
       // winnerCode: 1 = local, 2 = visitante, 3 = empate
-      const isHome = event.homeTeam.id === teamId;
-      const isAway = event.awayTeam.id === teamId;
+      const isHome = event.homeTeam?.id === teamId;
+      const isAway = event.awayTeam?.id === teamId;
 
       if (isHome && event.winnerCode === 1) wins++;
       if (isAway && event.winnerCode === 2) wins++;
@@ -68,8 +80,13 @@ export async function getTeamForm(teamName: string): Promise<TeamForm | null> {
       winPercentage,
       recentMatchesCount: recentEvents.length
     };
-  } catch (error) {
-    console.error('[SofaScore API] Error obteniendo form del equipo:', error);
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    if (error?.name === 'AbortError') {
+      console.warn(`[SofaScore API] Timeout (>2.8s) consultando ${teamName}, degradación elegante.`);
+    } else {
+      console.warn('[SofaScore API] Error obteniendo form del equipo (degradación elegante):', error?.message || error);
+    }
     return null;
   }
 }

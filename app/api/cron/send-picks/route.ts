@@ -1,47 +1,44 @@
 import { NextResponse } from 'next/server';
 import { getUpcomingMatches } from '@/lib/apis/odds-api';
-import { getLatestEventsFromSnapshot } from '@/app/actions/snapshots';
-import { getTopDailyPicks, enrichPicksWithStats } from '@/lib/algorithms/value-bet-calculator';
-import { sendDailyPicksTelegram, sendPickAlertTelegram, sendNoPicksTelegram } from '@/lib/notifications/telegram';
+import { getLatestEventsFromSnapshot, saveOddsSnapshot, detectSteamMoves } from '@/app/actions/snapshots';
+import { getTopDailyPicks, enrichPicksWithStats, isTodayInMexico, diagnoseEventsFunnel } from '@/lib/algorithms/value-bet-calculator';
+import {
+  sendDailyPicksTelegram,
+  sendPickAlertTelegram,
+  sendNoPicksTelegram,
+  sendSystemHealthAlertTelegram,
+} from '@/lib/notifications/telegram';
 import { saveSentPicks } from '@/lib/store/sent-picks';
-import { createClient } from '@supabase/supabase-js';
+import { createAdminClient } from '@/lib/supabase/admin';
 
-// ── Admin Supabase (para guardar los picks enviados y no repetir) ─────────────
-function getAdminClient() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  );
+function getTodayMexico(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' });
 }
 
-/**
- * Verifica si ya enviamos notificaciones hoy (para no spamear).
- */
 async function alreadySentToday(): Promise<boolean> {
   try {
-    const supabase = getAdminClient();
-    const today    = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const supabase = createAdminClient();
+    const today    = getTodayMexico();
 
     const { data } = await supabase
       .from('notification_log')
-      .select('id')
+      .select('id, picks_count')
       .eq('sent_date', today)
       .eq('type', 'daily_picks')
       .maybeSingle();
 
-    return !!data;
+    // Si hoy solo se registró picks_count = 0 por un snapshot vacío previo, permitir reintento si hay picks reales
+    if (!data) return false;
+    return (data.picks_count ?? 0) > 0;
   } catch {
-    return false; // Si hay error, mejor enviar que no enviar
+    return false;
   }
 }
 
-/**
- * Registra que ya enviamos las notificaciones de hoy.
- */
 async function logNotificationSent(picksCount: number): Promise<void> {
   try {
-    const supabase = getAdminClient();
-    const today    = new Date().toISOString().split('T')[0];
+    const supabase = createAdminClient();
+    const today    = getTodayMexico();
 
     await supabase.from('notification_log').upsert({
       sent_date:   today,
@@ -54,114 +51,187 @@ async function logNotificationSent(picksCount: number): Promise<void> {
   }
 }
 
-/**
- * Cron diario de notificaciones de picks.
- *
- * Flujo:
- *   1. Verifica que no se haya enviado ya hoy
- *   2. Obtiene los eventos con cuotas de la API
- *   3. Calcula los top 5-10 picks del día con getTopDailyPicks
- *   4. Envía el digest completo por Telegram
- *   5. Si hay picks de alta confianza, envía también alertas individuales
- */
+function isAuthorizedCron(request: Request): boolean {
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret) return true;
+
+  const authHeader = request.headers.get('authorization');
+  if (authHeader === `Bearer ${cronSecret}`) return true;
+
+  const url = new URL(request.url);
+  if (url.searchParams.get('secret') === cronSecret) return true;
+
+  return false;
+}
+
 export const maxDuration = 60;
 
 export async function GET(request: Request) {
-  // Validar que venga del cron de Vercel
-  const authHeader = request.headers.get('authorization');
-  if (process.env.CRON_SECRET && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!isAuthorizedCron(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
+  const url = new URL(request.url);
+  const forceSend = url.searchParams.get('force') === 'true';
+  const isDebug = url.searchParams.get('debug') === 'true';
+  const isDryRun = url.searchParams.get('dryRun') === 'true';
+  const timestamp = new Date().toISOString();
+  const telegramErrors: string[] = [];
+
   try {
-    // 1. Anti-spam: no enviar más de una vez al día
-    const alreadySent = await alreadySentToday();
-    if (alreadySent) {
-      console.log('[send-picks] Ya se enviaron notificaciones hoy, saltando...');
-      return NextResponse.json({ ok: true, skipped: true, reason: 'Already sent today' });
+    if (!forceSend && !isDebug && !isDryRun) {
+      const alreadySent = await alreadySentToday();
+      if (alreadySent) {
+        console.log('[send-picks] Ya se enviaron notificaciones con picks hoy, saltando...');
+        return NextResponse.json({ ok: true, skipped: true, reason: 'Already sent today', timestamp });
+      }
     }
 
-    // 2. Obtener eventos — primero intentar desde el snapshot de Supabase para no gastar requests
     console.log('[send-picks] Leyendo partidos desde snapshot de Supabase...');
-    const { events, fresh, snapshotAge } = await getLatestEventsFromSnapshot();
+    const snapshotResult = await getLatestEventsFromSnapshot(5);
 
-    let finalEvents = events;
-    if (!fresh || finalEvents.length === 0) {
-      // Fallback: el snapshot está vacío o tiene más de 7h → llamar a la API directamente
-      console.warn(`[send-picks] Snapshot no disponible (age=${snapshotAge}min). Llamando a The Odds API...`);
-      finalEvents = await getUpcomingMatches('upcoming');
-    } else {
-      console.log(`[send-picks] ✅ Usando snapshot (${snapshotAge}min antigüedad, ${finalEvents.length} eventos). Sin consumo de API.`);
+    let finalEvents = snapshotResult.events;
+    const now = Date.now();
+    let todayFutureEvents = finalEvents.filter(
+      e => isTodayInMexico(e.commence_time) && new Date(e.commence_time).getTime() > now
+    );
+
+    if (!snapshotResult.fresh || finalEvents.length === 0 || todayFutureEvents.length === 0) {
+      console.warn(`[send-picks] Snapshot insuficiente (age=${snapshotResult.snapshotAge}min, todayFuture=${todayFutureEvents.length}). Llamando a The Odds API...`);
+      const liveEvents = await getUpcomingMatches('upcoming');
+      if (liveEvents.length > 0) {
+        finalEvents = liveEvents;
+        await saveOddsSnapshot(liveEvents, true);
+        todayFutureEvents = finalEvents.filter(
+          e => isTodayInMexico(e.commence_time) && new Date(e.commence_time).getTime() > now
+        );
+      }
     }
+
+    const step1_events_fetched = finalEvents.length;
+    const step2_future_events_valid = todayFutureEvents.length;
 
     if (finalEvents.length === 0) {
-      console.log('[send-picks] Sin eventos disponibles hoy');
-      return NextResponse.json({ ok: true, skipped: true, reason: 'No events available' });
-    }
-
-    // 3. Calcular los mejores picks del día (solo partidos de HOY, con filtro de calidad)
-    let topPicks = getTopDailyPicks(finalEvents, {
-      minPicks:             1,
-      maxPicks:             10,
-      requireHighConfidence: false, // incluir también confianza media
-      todayOnly:            true,  // solo partidos que se juegan hoy (zona horaria México)
-    });
-
-    if (topPicks.length === 0) {
-      console.log('[send-picks] Sin picks de calidad suficiente hoy. Enviando aviso...');
-      const telegramResult = await sendNoPicksTelegram(finalEvents.length);
-      
-      // Registrar de todos modos para que ya no envíe en el día
-      await logNotificationSent(0);
-
-      return NextResponse.json({ 
-        ok: true, 
-        picksFound: 0, 
-        digestSent: telegramResult.ok, 
-        reason: 'No quality picks today' 
+      if (!isDryRun) {
+        await sendSystemHealthAlertTelegram('send-picks: 0 eventos obtenidos de snapshot y API');
+      }
+      return NextResponse.json({
+        ok: true,
+        skipped: true,
+        reason: 'No events available',
+        timestamp,
+        step1_events_fetched: 0,
+        step2_future_events_valid: 0,
       });
     }
 
-    // 3.5 Enriquecer picks con APIs externas (SofaScore)
-    // Esto podría subir la confianza de algunos picks de 'media' a 'alta'
-    topPicks = await enrichPicksWithStats(topPicks);
+    const diagnosis = diagnoseEventsFunnel(todayFutureEvents.length > 0 ? todayFutureEvents : finalEvents, 2.0);
 
-    console.log(`[send-picks] ${topPicks.length} picks calculados. Enviando notificaciones...`);
-
-    // 4. Enviar digest diario por Telegram
-    const telegramResult = await sendDailyPicksTelegram(topPicks);
-    if (!telegramResult.ok) {
-      console.error('[send-picks] Error enviando digest Telegram:', telegramResult.error);
-    }
-
-    // 5. Alertas individuales para picks de alta confianza (con Pinnacle align)
-    const alertPicks = topPicks.filter(p =>
-      p.confidence === 'alta' && p.pinnacleAligns && p.valuePercentage >= 5
-    );
-
-    let alertsSent = 0;
-    for (const pick of alertPicks.slice(0, 3)) { // máx 3 alertas para no spamear
-      await new Promise(r => setTimeout(r, 500)); // espera 0.5s entre mensajes
-      const alertResult = await sendPickAlertTelegram(pick);
-      if (alertResult.ok) alertsSent++;
-    }
-
-    // 6. Registrar en BD
-    await logNotificationSent(topPicks.length);
-
-    // 7. Guardar picks enviados en sent_picks para deduplicación con alertas intra-día
-    await saveSentPicks(topPicks, 'daily_digest');
-
-    return NextResponse.json({
-      ok:           true,
-      picksFound:   topPicks.length,
-      digestSent:   telegramResult.ok,
-      alertsSent,
-      timestamp:    new Date().toISOString(),
+    let topPicks = getTopDailyPicks(finalEvents, {
+      minPicks:              1,
+      maxPicks:              10,
+      requireHighConfidence: false,
+      todayOnly:             todayFutureEvents.length > 0,
     });
 
+    const step3_value_bets_calculated = topPicks.length;
+
+    if (topPicks.length === 0) {
+      console.log('[send-picks] Sin picks de calidad suficiente hoy. Enviando aviso...');
+      let digestOk = false;
+      if (!isDryRun) {
+        const telegramResult = await sendNoPicksTelegram(finalEvents.length);
+        digestOk = telegramResult.ok;
+        if (!telegramResult.ok && telegramResult.error) telegramErrors.push(telegramResult.error);
+        await logNotificationSent(0);
+      }
+
+      const funnel_diagnostics = {
+        timestamp,
+        step1_events_fetched,
+        step2_future_events_valid,
+        step3_value_bets_calculated: 0,
+        step4_passed_threshold_filters: 0,
+        step5_after_deduplication: 0,
+        step6_telegram_dispatched: digestOk ? 1 : 0,
+        telegram_errors: telegramErrors,
+        discard_reasons_summary: diagnosis.discardReasons,
+      };
+
+      return NextResponse.json({
+        ok: true,
+        picksFound: 0,
+        digestSent: digestOk,
+        reason: 'No quality picks today',
+        ...funnel_diagnostics,
+        funnel_diagnostics,
+      });
+    }
+
+    // Detectar Steam Moves
+    const { steamMap } = await detectSteamMoves(finalEvents);
+    topPicks = topPicks.map(p => {
+      const cleanPick = p.bestPick.replace(/🔥/g, '').trim();
+      const steam = steamMap.get(`${p.eventId}::${cleanPick}`);
+      if (steam) {
+        return { ...p, isSteamMove: true, steamMoveDelta: steam.impliedProbDeltaPct };
+      }
+      return p;
+    });
+
+    // Enriquecer con proveedores secundarios (aislado con timeout < 3s)
+    topPicks = await enrichPicksWithStats(topPicks);
+
+    let digestSent = false;
+    let alertsSent = 0;
+
+    if (!isDryRun) {
+      const telegramResult = await sendDailyPicksTelegram(topPicks);
+      digestSent = telegramResult.ok;
+      if (!telegramResult.ok && telegramResult.error) {
+        telegramErrors.push(telegramResult.error);
+      }
+
+      const alertPicks = topPicks.filter(
+        p => p.confidence === 'alta' && p.pinnacleAligns && p.valuePercentage >= 4.5
+      );
+
+      for (const pick of alertPicks.slice(0, 3)) {
+        await new Promise(r => setTimeout(r, 400));
+        const alertResult = await sendPickAlertTelegram(pick);
+        if (alertResult.ok) {
+          alertsSent++;
+        } else if (alertResult.error) {
+          telegramErrors.push(alertResult.error);
+        }
+      }
+
+      await logNotificationSent(topPicks.length);
+      await saveSentPicks(topPicks, 'daily_digest');
+    }
+
+    const funnel_diagnostics = {
+      timestamp,
+      step1_events_fetched,
+      step2_future_events_valid,
+      step3_value_bets_calculated,
+      step4_passed_threshold_filters: topPicks.length,
+      step5_after_deduplication: topPicks.length,
+      step6_telegram_dispatched: (digestSent ? 1 : 0) + alertsSent,
+      telegram_errors: telegramErrors,
+      discard_reasons_summary: diagnosis.discardReasons,
+    };
+
+    return NextResponse.json({
+      ok: true,
+      picksFound: topPicks.length,
+      digestSent,
+      alertsSent,
+      ...funnel_diagnostics,
+      funnel_diagnostics,
+    });
   } catch (error) {
     console.error('[send-picks] Error general:', error);
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: String(error), timestamp }, { status: 500 });
   }
 }

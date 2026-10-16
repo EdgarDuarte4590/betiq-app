@@ -2,21 +2,32 @@ import { NextResponse } from 'next/server';
 import { getUpcomingMatches } from '@/lib/apis/odds-api';
 import { saveOddsSnapshot } from '@/app/actions/snapshots';
 
-// Permitir hasta 60s de ejecución en Vercel para evitar cortes prematuros
 export const maxDuration = 60;
 
-// Vercel Cron / cron-job.org: ejecuta para mantener el snapshot de odds actualizado.
-// El rate-limit interno de saveOddsSnapshot evita duplicados si se llama más seguido.
-export async function GET(request: Request) {
-  // Validar que venga de Vercel Cron (en producción)
+function isAuthorizedCron(request: Request): boolean {
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret) return true;
+
   const authHeader = request.headers.get('authorization');
-  if (process.env.CRON_SECRET && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (authHeader === `Bearer ${cronSecret}`) return true;
+
+  const url = new URL(request.url);
+  if (url.searchParams.get('secret') === cronSecret) return true;
+
+  return false;
+}
+
+export async function GET(request: Request) {
+  if (!isAuthorizedCron(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
+  const url = new URL(request.url);
+  const force = url.searchParams.get('force') === 'true';
+
   try {
     const events = await getUpcomingMatches('upcoming');
-    await saveOddsSnapshot(events);
+    await saveOddsSnapshot(events, force);
     return NextResponse.json({
       ok: true,
       eventsRefreshed: events.length,

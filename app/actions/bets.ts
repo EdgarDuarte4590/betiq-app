@@ -1,14 +1,44 @@
 'use server';
 
 import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
 import { revalidatePath } from 'next/cache';
+import { type BetGradeOutcome } from '@/app/actions/syncScores';
+
+function calculateSettlementAccounting(
+  outcome: BetGradeOutcome,
+  stake: number,
+  odds: number
+): { profit: number; bankrollCredit: number } {
+  const netWin = (stake * odds) - stake;
+  switch (outcome) {
+    case 'won':
+      return { profit: Number(netWin.toFixed(2)), bankrollCredit: Number((stake + netWin).toFixed(2)) };
+    case 'half_won': {
+      const halfProfit = netWin / 2;
+      return { profit: Number(halfProfit.toFixed(2)), bankrollCredit: Number((stake + halfProfit).toFixed(2)) };
+    }
+    case 'push':
+    case 'void':
+      return { profit: 0, bankrollCredit: Number(stake.toFixed(2)) };
+    case 'half_lost': {
+      const halfLoss = stake / 2;
+      return { profit: Number((-halfLoss).toFixed(2)), bankrollCredit: Number(halfLoss.toFixed(2)) };
+    }
+    case 'lost':
+    default:
+      return { profit: Number((-stake).toFixed(2)), bankrollCredit: 0 };
+  }
+}
 
 /**
- * Marca una apuesta como Ganada o Perdida y actualiza el bankroll automáticamente.
+ * Marca una apuesta como Ganada, Perdida o Push/Void de manera idempotente (Ledger Pattern).
+ * Verifica atómicamente que la apuesta esté en estado `pending` antes de acreditar al bankroll,
+ * impidiendo dobles pagos ante ejecuciones concurrentes.
  */
 export async function markBetResult(
   betId: string,
-  result: 'won' | 'lost',
+  result: BetGradeOutcome,
   stake: number,
   odds: number
 ) {
@@ -17,22 +47,25 @@ export async function markBetResult(
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return { error: 'No autenticado' };
 
-  // Calcular profit (positivo si ganó, negativo si perdió)
-  const profit = result === 'won'
-    ? parseFloat(((stake * odds) - stake).toFixed(2))  // Ganancia neta
-    : -stake;  // Pérdida total
+  const adminSupabase = createAdminClient();
+  const { profit, bankrollCredit } = calculateSettlementAccounting(result, stake, odds);
 
-  // 1. Actualizar la apuesta
-  const { error: betError } = await supabase
+  // 1. Transición atómica idempotente: solo liquidar si actualmente es 'pending'
+  const { data: updatedRows, error: betError } = await adminSupabase
     .from('bets')
     .update({ status: result, profit })
     .eq('id', betId)
-    .eq('user_id', user.id); // Seguridad: solo el dueño puede actualizar
+    .eq('user_id', user.id)
+    .eq('status', 'pending')
+    .select('id');
 
   if (betError) return { error: betError.message };
+  if (!updatedRows || updatedRows.length === 0) {
+    return { error: 'La apuesta ya había sido liquidada previamente.' };
+  }
 
-  // 2. Actualizar el bankroll
-  const { data: profile, error: profileError } = await supabase
+  // 2. Actualizar el bankroll de forma segura
+  const { data: profile, error: profileError } = await adminSupabase
     .from('profiles')
     .select('bankroll_actual')
     .eq('id', user.id)
@@ -40,26 +73,52 @@ export async function markBetResult(
 
   if (profileError || !profile) return { error: 'No se pudo obtener el perfil' };
 
-  let newBankroll: number;
-  if (result === 'won') {
-    // Devolver stake + ganancia
-    newBankroll = parseFloat(profile.bankroll_actual) + stake + Math.abs(profit);
-  } else {
-    // Ya descontamos el stake al apostar; solo marcamos la pérdida
-    newBankroll = parseFloat(profile.bankroll_actual);
+  const currentBankroll = parseFloat(profile.bankroll_actual);
+  const newBankroll = Number((currentBankroll + bankrollCredit).toFixed(2));
+
+  if (bankrollCredit > 0) {
+    await adminSupabase
+      .from('profiles')
+      .update({ bankroll_actual: newBankroll })
+      .eq('id', user.id);
   }
 
-  await supabase
-    .from('profiles')
-    .update({ bankroll_actual: newBankroll })
-    .eq('id', user.id);
-
-  // Revalidar la caché de las páginas que muestran estos datos
   revalidatePath('/picks');
   revalidatePath('/dashboard');
   revalidatePath('/bankroll');
+  revalidatePath('/trends');
 
   return { success: true, profit, newBankroll };
+}
+
+/**
+ * Obtiene la exposición total actual comprometida en apuestas `PENDING` para el cálculo de Kelly Simultáneo.
+ */
+export async function getUserPendingExposure(): Promise<{
+  pendingStakeTotal: number;
+  pendingCount: number;
+}> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { pendingStakeTotal: 0, pendingCount: 0 };
+
+    const { data: pendingBets } = await supabase
+      .from('bets')
+      .select('stake')
+      .eq('user_id', user.id)
+      .eq('status', 'pending');
+
+    if (!pendingBets) return { pendingStakeTotal: 0, pendingCount: 0 };
+
+    const pendingStakeTotal = pendingBets.reduce((s, b) => s + parseFloat(String(b.stake || '0')), 0);
+    return {
+      pendingStakeTotal: Number(pendingStakeTotal.toFixed(2)),
+      pendingCount: pendingBets.length,
+    };
+  } catch {
+    return { pendingStakeTotal: 0, pendingCount: 0 };
+  }
 }
 
 /**
@@ -74,7 +133,6 @@ export async function updateBankrollSettings(
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return { error: 'No autenticado' };
 
-  // Check if the profile row exists first
   const { data: existing } = await supabase
     .from('profiles')
     .select('id')
@@ -84,7 +142,6 @@ export async function updateBankrollSettings(
   let error;
 
   if (!existing) {
-    // Profile was deleted manually — recreate it with all required fields
     const { error: insertError } = await supabase
       .from('profiles')
       .insert({
@@ -95,7 +152,6 @@ export async function updateBankrollSettings(
       });
     error = insertError;
   } else {
-    // Normal case — just UPDATE
     const { error: updateError } = await supabase
       .from('profiles')
       .update({
@@ -115,7 +171,7 @@ export async function updateBankrollSettings(
 }
 
 /**
- * Elimina una apuesta (solo pendientes) y devuelve el stake al bankroll.
+ * Elimina una apuesta (solo pendientes) de forma idempotente y devuelve el stake al bankroll.
  */
 export async function deleteBet(betId: string, stake: number) {
   const supabase = await createClient();
@@ -123,37 +179,34 @@ export async function deleteBet(betId: string, stake: number) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return { error: 'No autenticado' };
 
-  // Solo se pueden borrar apuestas pendientes
-  const { data: bet } = await supabase
-    .from('bets')
-    .select('status')
-    .eq('id', betId)
-    .eq('user_id', user.id)
-    .single();
+  const adminSupabase = createAdminClient();
 
-  if (!bet) return { error: 'Apuesta no encontrada' };
-  if (bet.status !== 'pending') return { error: 'Solo se pueden borrar apuestas pendientes' };
-
-  // 1. Borrar la apuesta
-  const { error: deleteError } = await supabase
+  // Borrado atómico condicionado a status = 'pending'
+  const { data: deletedRows, error: deleteError } = await adminSupabase
     .from('bets')
     .delete()
     .eq('id', betId)
-    .eq('user_id', user.id);
+    .eq('user_id', user.id)
+    .eq('status', 'pending')
+    .select('id, stake');
 
   if (deleteError) return { error: deleteError.message };
+  if (!deletedRows || deletedRows.length === 0) {
+    return { error: 'Solo se pueden borrar apuestas pendientes o ya fue eliminada' };
+  }
 
-  // 2. Devolver el stake al bankroll
-  const { data: profile } = await supabase
+  const refundStake = parseFloat(String(deletedRows[0].stake ?? stake));
+
+  const { data: profile } = await adminSupabase
     .from('profiles')
     .select('bankroll_actual')
     .eq('id', user.id)
     .single();
 
   if (profile) {
-    await supabase
+    await adminSupabase
       .from('profiles')
-      .update({ bankroll_actual: parseFloat(profile.bankroll_actual) + stake })
+      .update({ bankroll_actual: Number((parseFloat(profile.bankroll_actual) + refundStake).toFixed(2)) })
       .eq('id', user.id);
   }
 
@@ -176,7 +229,6 @@ export async function editBet(
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return { error: 'No autenticado' };
 
-  // Solo se pueden editar apuestas pendientes
   const { data: existing } = await supabase
     .from('bets')
     .select('status, stake')
@@ -185,11 +237,12 @@ export async function editBet(
     .single();
 
   if (!existing) return { error: 'Apuesta no encontrada' };
-  if (existing.status !== 'pending') return { error: 'Solo se pueden editar apuestas pendientes' };
+  if (existing.status !== 'pending' && Object.keys(updates).some(k => k !== 'notes')) {
+    return { error: 'Solo se pueden editar apuestas pendientes' };
+  }
 
-  // Si cambió el stake, ajustamos el bankroll
-  if (updates.stake !== undefined && updates.stake !== parseFloat(existing.stake)) {
-    const diff = parseFloat(existing.stake) - updates.stake; // positivo = devolver dinero
+  if (existing.status === 'pending' && updates.stake !== undefined && updates.stake !== parseFloat(existing.stake)) {
+    const diff = parseFloat(existing.stake) - updates.stake;
     const { data: profile } = await supabase
       .from('profiles')
       .select('bankroll_actual')
@@ -198,7 +251,7 @@ export async function editBet(
     if (profile) {
       await supabase
         .from('profiles')
-        .update({ bankroll_actual: parseFloat(profile.bankroll_actual) + diff })
+        .update({ bankroll_actual: Number((parseFloat(profile.bankroll_actual) + diff).toFixed(2)) })
         .eq('id', user.id);
     }
   }

@@ -4,11 +4,17 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { revalidatePath } from 'next/cache';
 import { getActiveKey, recordKeyUsage, markKeyExhausted } from '@/lib/apis/key-manager';
+import {
+  resolveScoreEvent,
+  calculateEntitySimilarity,
+  normalizeTeamEntity,
+} from '@/lib/apis/entity-resolver';
+import { SPORT_SCHEDULE } from '@/lib/apis/odds-api';
 
 /**
  * Scores API response types from The Odds API
  */
-interface ScoreEvent {
+export interface ScoreEvent {
   id: string;
   sport_key: string;
   sport_title: string;
@@ -20,14 +26,14 @@ interface ScoreEvent {
   last_update: string | null;
 }
 
+export type BetGradeOutcome = 'won' | 'lost' | 'push' | 'void' | 'half_won' | 'half_lost';
+
 /**
  * Fetches completed scores from The Odds API for the last 3 days.
- * Costs 2 quota per sport (with daysFrom=3).
- * We only call for leagues where the user has pending bets.
+ * Con rotación automática de llaves ante 401/402/429.
  */
-async function fetchScores(sportKey: string): Promise<ScoreEvent[]> {
-  // Obtener la key activa del pool de rotación
-  const API_KEY = await getActiveKey();
+async function fetchScores(sportKey: string, excludedKeys: Set<string> = new Set()): Promise<ScoreEvent[]> {
+  const API_KEY = await getActiveKey(excludedKeys);
   if (!API_KEY) {
     console.error('[syncScores] No hay API keys disponibles para fetchScores');
     return [];
@@ -36,155 +42,219 @@ async function fetchScores(sportKey: string): Promise<ScoreEvent[]> {
   try {
     const res = await fetch(
       `https://api.the-odds-api.com/v4/sports/${sportKey}/scores/?apiKey=${API_KEY}&daysFrom=3`,
-      { cache: 'no-store' } // Always fresh data for grading
+      { cache: 'no-store' }
     );
 
-    // Registrar uso de la key
     await recordKeyUsage(API_KEY, res.headers);
 
     if (!res.ok) {
-      if (res.status === 401 || res.status === 429) {
-        await markKeyExhausted(API_KEY);
-        console.warn(`[syncScores] Key agotada (${res.status}), marcada para rotación`);
+      if (res.status === 401 || res.status === 402 || res.status === 429) {
+        await markKeyExhausted(API_KEY, res.status);
+        excludedKeys.add(API_KEY);
+        const nextKey = await getActiveKey(excludedKeys);
+        if (nextKey) {
+          return fetchScores(sportKey, excludedKeys);
+        }
       }
       return [];
     }
-    return await res.json();
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
   } catch {
     return [];
   }
 }
 
 /**
- * Normalizes team names for fuzzy matching.
- * Strips common suffixes, lowercases, removes accents.
- */
-function normalize(name: string): string {
-  return name
-    .toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // strip accents
-    .replace(/\s+(fc|cf|sc|ac|as|ss|bc|club)$/i, '')
-    .trim();
-}
-
-/**
- * Tries to match a bet's event string to an API score event.
- * The event field stored is usually "Team A vs Team B".
+ * Empareja el evento de una apuesta con un partido finalizado usando
+ * `entity-resolver.ts` (Jaro-Winkler / Dice >= 0.85 + ventana horaria ±2h).
  */
 function matchBetToScore(
   betEvent: string,
   betTime: string | null,
   scores: ScoreEvent[]
 ): ScoreEvent | null {
-  const normBet = normalize(betEvent);
-  
-  for (const score of scores) {
-    if (!score.completed || !score.scores) continue;
-    
-    // Enforce Date check: Solo hace match si la fecha del partido coincide con la que se guardó
-    if (betTime) {
-      const betDate = new Date(betTime).toISOString().split('T')[0];
-      const scoreDate = new Date(score.commence_time).toISOString().split('T')[0];
-      // Si el partido está guardado para hoy, ignora partidos de The Odds API que hayan sido ayer o mañana
-      if (betDate !== scoreDate) {
-        continue;
-      }
-    }
-    
-    const normHome = normalize(score.home_team);
-    const normAway = normalize(score.away_team);
-    
-    // Check if both team names appear in the bet event string
-    if (normBet.includes(normHome) && normBet.includes(normAway)) {
-      return score;
-    }
-    
-    // Also check "away vs home" format
-    const combined1 = `${normHome} vs ${normAway}`;
-    const combined2 = `${normAway} vs ${normHome}`;
-    if (normBet === combined1 || normBet === combined2) {
-      return score;
-    }
-  }
-  
-  return null;
+  return resolveScoreEvent(betEvent, betTime, scores, 0.85);
 }
 
 /**
- * Determines if the user's pick won based on scores.
- * For H2H market, we check which team scored higher.
- * For Draw, we check if it's a tie.
+ * Extrae los goles/puntos de local y visitante verificando el nombre de cada equipo en `score.scores`.
  */
-function didPickWin(
+function extractHomeAwayScores(score: ScoreEvent): { homeScore: number; awayScore: number } | null {
+  if (!score.scores || score.scores.length < 2) return null;
+
+  let homeEntry = score.scores.find(s => calculateEntitySimilarity(s.name, score.home_team) >= 0.85);
+  let awayEntry = score.scores.find(s => calculateEntitySimilarity(s.name, score.away_team) >= 0.85);
+
+  if (!homeEntry || !awayEntry) {
+    homeEntry = score.scores[0];
+    awayEntry = score.scores[1];
+  }
+
+  const homeScore = parseInt(homeEntry.score, 10);
+  const awayScore = parseInt(awayEntry.score, 10);
+
+  if (isNaN(homeScore) || isNaN(awayScore)) return null;
+  return { homeScore, awayScore };
+}
+
+/**
+ * Determina el resultado exacto de la apuesta soportando:
+ * - 'won', 'lost', 'push', 'void', 'half_won', 'half_lost'
+ */
+function gradePickOutcome(
   pick: string,
   score: ScoreEvent,
   market: string
-): boolean | null {
-  if (!score.scores || score.scores.length < 2) return null;
+): BetGradeOutcome | null {
+  const parsed = extractHomeAwayScores(score);
+  if (!parsed) return null;
 
-  const homeScore = parseInt(score.scores[0].score);
-  const awScore = parseInt(score.scores[1].score);
-  
-  if (isNaN(homeScore) || isNaN(awScore)) return null;
-  const totalScore = homeScore + awScore;
-  
-  const normPick = normalize(pick);
-  const normHome = normalize(score.home_team);
-  const normAway = normalize(score.away_team);
+  const { homeScore, awayScore } = parsed;
+  const totalScore = homeScore + awayScore;
 
-  // ── Totals / Over/Under ── (handles 'Over 2.5', 'Under 9.5', 'Goles +1.5', 'Carreras +8.5')
-  // Check market name first, then pick label
-  const isOverUnderMarket = /over.?under|totals|goles\s*[+\-]|carreras\s*[+\-]|puntos\s*[+\-]/i.test(market);
-  const isOverPick  = /(^|\s)(over|mas|más|\+)/i.test(pick);
-  const isUnderPick = /(^|\s)(under|menos)/i.test(pick);
-  
+  const cleanPick = pick.replace(/🔥/g, '').trim();
+  const normPick = normalizeTeamEntity(cleanPick);
+
+  // ── 1. Totals / Over/Under (con soporte de líneas enteras -> PUSH y asiáticas .25/.75) ──
+  const isOverUnderMarket = /over.?under|totals|goles\s*[+\-]|carreras\s*[+\-]|puntos\s*[+\-]/i.test(market || '');
+  const isOverPick  = /(^|\s)(over|mas|más|\+)/i.test(cleanPick);
+  const isUnderPick = /(^|\s)(under|menos)/i.test(cleanPick);
+
   if (isOverUnderMarket || isOverPick || isUnderPick) {
-    const numMatch = pick.match(/([0-9]+(?:\.[0-9]+)?)/);
-    if (numMatch) {
-      const line = parseFloat(numMatch[1]);
-      if (isOverPick) return totalScore > line;
-      if (isUnderPick) return totalScore < line;
-      // If market says totals but pick label unclear, check if "over" is anywhere in pick
-      if (isOverUnderMarket) {
-        if (/over|más|\+/i.test(pick)) return totalScore > line;
-        if (/under|menos/i.test(pick)) return totalScore < line;
-      }
-    }
-    return null; // can't determine without a line
+    const numMatch = cleanPick.match(/([0-9]+(?:\.[0-9]+)?)/) || (market || '').match(/([0-9]+(?:\.[0-9]+)?)/);
+    if (!numMatch) return null;
+
+    const line = parseFloat(numMatch[1]);
+    if (isNaN(line)) return null;
+
+    const isOver = isOverPick || (isOverUnderMarket && /over|más|\+/i.test(cleanPick || market));
+    const isUnder = isUnderPick || (isOverUnderMarket && /under|menos|-/i.test(cleanPick || market));
+
+    if (!isOver && !isUnder) return null;
+
+    const diff = isOver ? totalScore - line : line - totalScore;
+    if (Math.abs(diff) < 1e-6) return 'push'; // Línea exacta (ej. Over 2.0 y hubo 2 goles)
+    if (Math.abs(diff - 0.25) < 1e-6) return 'half_won';
+    if (Math.abs(diff + 0.25) < 1e-6) return 'half_lost';
+    return diff > 0 ? 'won' : 'lost';
   }
 
-  // ── H2H / Ganador bets ──
-  if (market === 'H2H' || market === 'Ganador' || !market || normPick.includes('gana')) {
-    if (normPick.includes(normHome) || normHome.includes(normPick.replace('gana ', '').trim())) {
-      return homeScore > awScore;
-    }
-    if (normPick.includes(normAway) || normAway.includes(normPick.replace('gana ', '').trim())) {
-      return awScore > homeScore;
-    }
-  }
-  
-  // ── Draw / Empate ──
+  // ── 2. Draw / Empate ──
   if (market === 'Empate' || normPick === 'draw' || normPick === 'empate') {
-    return homeScore === awScore;
+    return homeScore === awayScore ? 'won' : 'lost';
+  }
+
+  // ── 3. H2H / Ganador (con Entity Resolution Jaro-Winkler / Dice >= 0.85) ──
+  if (market === 'H2H' || market === 'Ganador' || !market || /^gana\s+/i.test(cleanPick)) {
+    const teamCandidate = cleanPick.replace(/^gana\s+/i, '').trim();
+    const simHome = calculateEntitySimilarity(teamCandidate, score.home_team);
+    const simAway = calculateEntitySimilarity(teamCandidate, score.away_team);
+
+    if (simHome >= 0.85 && simHome >= simAway) {
+      return homeScore > awayScore ? 'won' : 'lost';
+    }
+    if (simAway >= 0.85 && simAway > simHome) {
+      return awayScore > homeScore ? 'won' : 'lost';
+    }
   }
 
   return null;
 }
 
 /**
- * syncScores - The Auto-Grader Server Action
- * 
- * 1. Fetches all pending bets for the current user
- * 2. Groups them by sport to minimize API calls
- * 3. Fetches scores for relevant sports
- * 4. Matches and grades each bet
- * 5. Updates bankroll accordingly
+ * Calcula el profit neto y el monto a retornar al bankroll según el estado de liquidación
+ * (recordando que el `stake` ya se descontó cuando la apuesta quedó en `pending`).
+ */
+function calculateSettlementAccounting(
+  outcome: BetGradeOutcome,
+  stake: number,
+  odds: number
+): {
+  profit: number;
+  bankrollCredit: number; // Cuánto sumar a bankroll_actual al liquidar desde PENDING
+} {
+  const netWin = (stake * odds) - stake;
+
+  switch (outcome) {
+    case 'won':
+      return {
+        profit: Number(netWin.toFixed(2)),
+        bankrollCredit: Number((stake + netWin).toFixed(2)),
+      };
+    case 'half_won': {
+      const halfProfit = netWin / 2;
+      return {
+        profit: Number(halfProfit.toFixed(2)),
+        bankrollCredit: Number((stake + halfProfit).toFixed(2)),
+      };
+    }
+    case 'push':
+    case 'void':
+      return {
+        profit: 0,
+        bankrollCredit: Number(stake.toFixed(2)), // Devolver el stake íntegro
+      };
+    case 'half_lost': {
+      const halfLoss = -(stake / 2);
+      return {
+        profit: Number(halfLoss.toFixed(2)),
+        bankrollCredit: Number((stake / 2).toFixed(2)), // Devolver mitad del stake
+      };
+    }
+    case 'lost':
+    default:
+      return {
+        profit: Number((-stake).toFixed(2)),
+        bankrollCredit: 0, // El stake ya fue descontado al crear la apuesta
+      };
+  }
+}
+
+/**
+ * Resuelve las ligas de The Odds API que se deben consultar según las apuestas pendientes.
+ */
+function resolveSportKeysForPendingBets(pendingBets: any[]): Set<string> {
+  const validScheduleKeys = new Set(SPORT_SCHEDULE.map(s => s.key));
+  const sportKeys = new Set<string>();
+
+  for (const bet of pendingBets) {
+    const rawSport = String(bet.sport || '').trim();
+    if (validScheduleKeys.has(rawSport) || rawSport.includes('_')) {
+      sportKeys.add(rawSport);
+    } else if (rawSport.includes('🏀') || rawSport.toLowerCase().includes('basketball')) {
+      sportKeys.add('basketball_nba');
+    } else if (rawSport.includes('⚾') || rawSport.toLowerCase().includes('baseball')) {
+      sportKeys.add('baseball_mlb');
+    } else {
+      // Si es el ícono genérico ⚽, incluir las ligas de fútbol principales
+      sportKeys.add('soccer_usa_mls');
+      sportKeys.add('soccer_mexico_ligamx');
+      sportKeys.add('soccer_brazil_campeonato');
+      sportKeys.add('soccer_argentina_primera_division');
+      sportKeys.add('soccer_epl');
+      sportKeys.add('soccer_spain_la_liga');
+      sportKeys.add('soccer_italy_serie_a');
+      sportKeys.add('soccer_germany_bundesliga');
+      sportKeys.add('soccer_france_ligue_one');
+      sportKeys.add('soccer_uefa_champs_league');
+    }
+  }
+
+  return sportKeys;
+}
+
+/**
+ * syncScores - Auto-Grader Server Action para el usuario autenticado.
+ * Implementa el patrón Libro Mayor Inmutable (Ledger Idempotency):
+ * verifica atómicamente `WHERE id = X AND status = 'pending'` antes de acreditar el bankroll.
  */
 export async function syncScores(): Promise<{
   success: boolean;
   graded: number;
   won: number;
   lost: number;
+  pushed?: number;
   skipped: number;
   error?: string;
 }> {
@@ -192,8 +262,9 @@ export async function syncScores(): Promise<{
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return { success: false, graded: 0, won: 0, lost: 0, skipped: 0, error: 'No autenticado' };
 
-  // 1. Get all pending bets
-  const { data: pendingBets, error: betsError } = await supabase
+  const adminSupabase = createAdminClient();
+
+  const { data: pendingBets, error: betsError } = await adminSupabase
     .from('bets')
     .select('*')
     .eq('user_id', user.id)
@@ -201,149 +272,101 @@ export async function syncScores(): Promise<{
 
   if (betsError) return { success: false, graded: 0, won: 0, lost: 0, skipped: 0, error: betsError.message };
   if (!pendingBets || pendingBets.length === 0) {
-    return { success: true, graded: 0, won: 0, lost: 0, skipped: 0 };
+    return { success: true, graded: 0, won: 0, lost: 0, pushed: 0, skipped: 0 };
   }
 
-  // 2. Map sport names from our DB to API sport keys
-  // Dinámico: si el bet ya tiene un sport_key válido de la API, lo usamos directamente.
-  // Solo usamos fallbacks para emojis o valores genéricos.
-  const sportKeyMap: Record<string, string> = {
-    // Temporada actual — Mundial 2026
-    'soccer_fifa_world_cup': 'soccer_fifa_world_cup',
-    // Ligas activas
-    'basketball_nba': 'basketball_nba',
-    'baseball_mlb': 'baseball_mlb',
-    // Legado — ligas europeas (para grading de bets viejas que quedaron pendientes)
-    'soccer_epl': 'soccer_epl',
-    'soccer_spain_la_liga': 'soccer_spain_la_liga',
-    'soccer_uefa_champs_league': 'soccer_uefa_champs_league',
-    'soccer_france_ligue_one': 'soccer_france_ligue_one',
-    'soccer_italy_serie_a': 'soccer_italy_serie_a',
-    'soccer_germany_bundesliga': 'soccer_germany_bundesliga',
-    // Generic emoji fallbacks
-    '⚽': 'soccer_fifa_world_cup',
-    '🏆': 'soccer_fifa_world_cup',
-    '🏀': 'basketball_nba',
-    '⚾': 'baseball_mlb',
-  };
-
-  // Collect unique sport keys from pending bets
-  const sportKeys = new Set<string>();
-  for (const bet of pendingBets) {
-    const key = sportKeyMap[bet.sport] || bet.sport;
-    // Si el key es un sport_key válido de la API, úsalo directamente
-    if (key.includes('soccer') || key.includes('⚽') || key.includes('🏆')) {
-      // Usar el key específico si existe en el mapa, si no el genérico del Mundial
-      sportKeys.add(sportKeyMap[bet.sport] || 'soccer_fifa_world_cup');
-    } else if (key.includes('basketball') || key.includes('🏀')) {
-      sportKeys.add('basketball_nba');
-    } else if (key.includes('baseball') || key.includes('⚾')) {
-      sportKeys.add('baseball_mlb');
-    } else {
-      // Default: fetch las ligas activas actuales
-      sportKeys.add('soccer_fifa_world_cup');
-      sportKeys.add('basketball_nba');
-      sportKeys.add('baseball_mlb');
-    }
-  }
-
-  // 3. Fetch scores from API for each sport (parallelized)
+  const sportKeys = resolveSportKeysForPendingBets(pendingBets);
   const allScores: ScoreEvent[] = [];
-  const scorePromises = Array.from(sportKeys).map(async (sportKey) => {
-    const scores = await fetchScores(sportKey);
-    return scores;
-  });
-  const results = await Promise.all(scorePromises);
+  const results = await Promise.all(Array.from(sportKeys).map(sk => fetchScores(sk)));
   results.forEach(r => allScores.push(...r));
 
-  // 4. Grade each pending bet
   let graded = 0;
   let won = 0;
   let lost = 0;
+  let pushed = 0;
   let skipped = 0;
-
-  // Get current bankroll
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('bankroll_actual')
-    .eq('id', user.id)
-    .single();
-
-  let currentBankroll = parseFloat(profile?.bankroll_actual ?? '1000');
+  let totalBankrollCredit = 0;
 
   for (const bet of pendingBets) {
-    // bet.match_time might be missing in old accounts, so we pass it safely
     const matchedScore = matchBetToScore(bet.event, bet.match_time ?? null, allScores);
-    
     if (!matchedScore) {
       skipped++;
       continue;
     }
 
-    const result = didPickWin(bet.pick, matchedScore, bet.market);
-    
-    if (result === null) {
+    const outcome = gradePickOutcome(bet.pick, matchedScore, bet.market);
+    if (outcome === null) {
       skipped++;
       continue;
     }
 
     const stake = parseFloat(bet.stake);
     const odds = parseFloat(bet.odds);
-    const status = result ? 'won' : 'lost';
-    const profit = result
-      ? parseFloat(((stake * odds) - stake).toFixed(2))
-      : -stake;
+    const { profit, bankrollCredit } = calculateSettlementAccounting(outcome, stake, odds);
 
-    // Update bet in DB
-    await supabase
+    // Transición atómica idempotente: SOLO actualiza si sigue en estado 'pending'
+    const { data: updatedRows, error: updateErr } = await adminSupabase
       .from('bets')
-      .update({ status, profit })
+      .update({ status: outcome, profit })
       .eq('id', bet.id)
-      .eq('user_id', user.id);
+      .eq('user_id', user.id)
+      .eq('status', 'pending')
+      .select('id');
 
-    // Update bankroll
-    if (result) {
-      currentBankroll += stake + Math.abs(profit); // Return stake + winnings
-      won++;
+    if (updateErr || !updatedRows || updatedRows.length === 0) {
+      // Otra ejecución concurrente ya liquidó esta apuesta → no acreditar dos veces
+      continue;
     }
-    // If lost, stake was already deducted when bet was placed
-    else {
-      lost++;
-    }
+
+    totalBankrollCredit += bankrollCredit;
+    if (outcome === 'won' || outcome === 'half_won') won++;
+    else if (outcome === 'push' || outcome === 'void') pushed++;
+    else lost++;
 
     graded++;
   }
 
-  // 5. Save final bankroll
   if (graded > 0) {
-    await supabase
-      .from('profiles')
-      .update({ bankroll_actual: currentBankroll })
-      .eq('id', user.id);
+    if (totalBankrollCredit > 0) {
+      const { data: profile } = await adminSupabase
+        .from('profiles')
+        .select('bankroll_actual')
+        .eq('id', user.id)
+        .single();
+
+      const currentBankroll = parseFloat(profile?.bankroll_actual ?? '1000');
+      const nextBankroll = Number((currentBankroll + totalBankrollCredit).toFixed(2));
+
+      await adminSupabase
+        .from('profiles')
+        .update({ bankroll_actual: nextBankroll })
+        .eq('id', user.id);
+    }
 
     revalidatePath('/picks');
     revalidatePath('/dashboard');
     revalidatePath('/bankroll');
+    revalidatePath('/trends');
   }
 
-  return { success: true, graded, won, lost, skipped };
+  return { success: true, graded, won, lost, pushed, skipped };
 }
 
 /**
- * Global Auto-Grader for Cron Jobs
- * Uses Admin Client to grade all pending bets for all users.
+ * Global Auto-Grader para Cron Jobs (`/api/cron/sync-scores`).
+ * Usa exclusivamente `createAdminClient()` y liquidación atómica idempotente.
  */
 export async function syncAllPendingBets(): Promise<{
   success: boolean;
   graded: number;
   won: number;
   lost: number;
+  pushed?: number;
   skipped: number;
   error?: string;
 }> {
   const supabase = createAdminClient();
 
-  // 1. Get ALL pending bets
   const { data: pendingBets, error: betsError } = await supabase
     .from('bets')
     .select('*')
@@ -351,90 +374,79 @@ export async function syncAllPendingBets(): Promise<{
 
   if (betsError) return { success: false, graded: 0, won: 0, lost: 0, skipped: 0, error: betsError.message };
   if (!pendingBets || pendingBets.length === 0) {
-    return { success: true, graded: 0, won: 0, lost: 0, skipped: 0 };
+    return { success: true, graded: 0, won: 0, lost: 0, pushed: 0, skipped: 0 };
   }
 
-  const sportKeyMap: Record<string, string> = {
-    'soccer_fifa_world_cup': 'soccer_fifa_world_cup',
-    'basketball_nba': 'basketball_nba',
-    'baseball_mlb': 'baseball_mlb',
-    'soccer_epl': 'soccer_epl',
-    'soccer_spain_la_liga': 'soccer_spain_la_liga',
-    'soccer_uefa_champs_league': 'soccer_uefa_champs_league',
-    'soccer_france_ligue_one': 'soccer_france_ligue_one',
-    'soccer_italy_serie_a': 'soccer_italy_serie_a',
-    'soccer_germany_bundesliga': 'soccer_germany_bundesliga',
-    '⚽': 'soccer_fifa_world_cup',
-    '🏆': 'soccer_fifa_world_cup',
-    '🏀': 'basketball_nba',
-    '⚾': 'baseball_mlb',
-  };
-
-  const sportKeys = new Set<string>();
-  for (const bet of pendingBets) {
-    const key = sportKeyMap[bet.sport] || bet.sport;
-    if (key.includes('soccer') || key.includes('⚽') || key.includes('🏆')) {
-      sportKeys.add(sportKeyMap[bet.sport] || 'soccer_fifa_world_cup');
-    } else if (key.includes('basketball') || key.includes('🏀')) {
-      sportKeys.add('basketball_nba');
-    } else if (key.includes('baseball') || key.includes('⚾')) {
-      sportKeys.add('baseball_mlb');
-    } else {
-      sportKeys.add('soccer_fifa_world_cup');
-      sportKeys.add('basketball_nba');
-      sportKeys.add('baseball_mlb');
-    }
-  }
-
+  const sportKeys = resolveSportKeysForPendingBets(pendingBets);
   const allScores: ScoreEvent[] = [];
-  const scorePromises = Array.from(sportKeys).map(async (sportKey) => {
-    return await fetchScores(sportKey);
-  });
-  const results = await Promise.all(scorePromises);
+  const results = await Promise.all(Array.from(sportKeys).map(sk => fetchScores(sk)));
   results.forEach(r => allScores.push(...r));
 
   let graded = 0;
   let won = 0;
   let lost = 0;
+  let pushed = 0;
   let skipped = 0;
 
-  // We need to group by user to update bankrolls efficiently
-  const userBankrollUpdates: Record<string, number> = {};
+  const userBankrollCredits: Record<string, number> = {};
 
   for (const bet of pendingBets) {
     const matchedScore = matchBetToScore(bet.event, bet.match_time ?? null, allScores);
-    if (!matchedScore) { skipped++; continue; }
+    if (!matchedScore) {
+      skipped++;
+      continue;
+    }
 
-    const result = didPickWin(bet.pick, matchedScore, bet.market);
-    if (result === null) { skipped++; continue; }
+    const outcome = gradePickOutcome(bet.pick, matchedScore, bet.market);
+    if (outcome === null) {
+      skipped++;
+      continue;
+    }
 
     const stake = parseFloat(bet.stake);
     const odds = parseFloat(bet.odds);
-    const status = result ? 'won' : 'lost';
-    const profit = result ? parseFloat(((stake * odds) - stake).toFixed(2)) : -stake;
+    const { profit, bankrollCredit } = calculateSettlementAccounting(outcome, stake, odds);
 
-    await supabase.from('bets').update({ status, profit }).eq('id', bet.id);
+    // Liquidación atómica idempotente: solo procede si la fila estaba en 'pending'
+    const { data: updatedRows, error: updateErr } = await supabase
+      .from('bets')
+      .update({ status: outcome, profit })
+      .eq('id', bet.id)
+      .eq('status', 'pending')
+      .select('id');
 
-    if (result) {
-      userBankrollUpdates[bet.user_id] = (userBankrollUpdates[bet.user_id] || 0) + stake + Math.abs(profit);
-      won++;
-    } else {
-      lost++;
+    if (updateErr || !updatedRows || updatedRows.length === 0) {
+      continue;
     }
+
+    if (bankrollCredit > 0) {
+      userBankrollCredits[bet.user_id] = (userBankrollCredits[bet.user_id] || 0) + bankrollCredit;
+    }
+
+    if (outcome === 'won' || outcome === 'half_won') won++;
+    else if (outcome === 'push' || outcome === 'void') pushed++;
+    else lost++;
+
     graded++;
   }
 
-  // Update bankrolls
-  for (const [userId, amountToAdd] of Object.entries(userBankrollUpdates)) {
+  for (const [userId, amountToAdd] of Object.entries(userBankrollCredits)) {
     if (amountToAdd > 0) {
-      const { data: profile } = await supabase.from('profiles').select('bankroll_actual').eq('id', userId).single();
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('bankroll_actual')
+        .eq('id', userId)
+        .single();
+
       if (profile) {
-        await supabase.from('profiles').update({ 
-          bankroll_actual: parseFloat(profile.bankroll_actual) + amountToAdd 
-        }).eq('id', userId);
+        const updatedBalance = Number((parseFloat(profile.bankroll_actual) + amountToAdd).toFixed(2));
+        await supabase
+          .from('profiles')
+          .update({ bankroll_actual: updatedBalance })
+          .eq('id', userId);
       }
     }
   }
 
-  return { success: true, graded, won, lost, skipped };
+  return { success: true, graded, won, lost, pushed, skipped };
 }

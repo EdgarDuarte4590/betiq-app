@@ -2,18 +2,23 @@
 
 import LocalTime from '@/components/LocalTime';
 import { useBankrollStore } from '@/lib/store/bankrollStore';
-import type { SmartPick } from '@/lib/algorithms/value-bet-calculator';
+import { calculateSimultaneousKelly, type SmartPick } from '@/lib/algorithms/value-bet-calculator';
 import { getSportMeta } from '@/lib/apis/odds-api';
 import { ShieldCheck, AlertTriangle, Eye, TrendingUp } from 'lucide-react';
 
 export default function PickCard({ pick, isLive = false }: { pick: SmartPick; isLive?: boolean }) {
-  const { openModal, bankroll } = useBankrollStore();
+  const { openModal, bankroll, pendingExposure } = useBankrollStore();
 
   const { icon } = getSportMeta(pick.sport);
   const realBankroll = bankroll > 0 ? bankroll : 1000;
-  const suggestedStake = pick.kellyStake > 0
-    ? ((realBankroll * pick.kellyStake) / 100).toFixed(2)
-    : '50';
+
+  // Aplicar Kelly Simultáneo (reduce stake si >15% del bankroll ya está en apuestas PENDING)
+  const simKelly = calculateSimultaneousKelly(pick.kellyStake, realBankroll, pendingExposure);
+  const suggestedStake = simKelly.recommendedStakeCurrency > 0
+    ? simKelly.recommendedStakeCurrency.toFixed(2)
+    : Math.max(5, realBankroll * 0.01).toFixed(2);
+
+  const fairOddsVal = pick.fairOdds ?? (pick.marketProbability > 0 ? Number((1 / pick.marketProbability).toFixed(2)) : undefined);
 
   const handleCardClick = () => {
     openModal({
@@ -27,6 +32,10 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
       matchTime: pick.commenceTime,
       sportKey: pick.sport,
       confidence: pick.confidence,
+      kellyPct: simKelly.adjustedKellyPct,
+      fairOdds: fairOddsVal,
+      units: simKelly.recommendedUnits,
+      isSteamMove: pick.isSteamMove,
     });
   };
 
@@ -55,28 +64,30 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
   };
   const conf = confidenceConfig[pick.confidence];
 
-  // Build explanation text
   const explanationParts: string[] = [];
   if (pick.pinnacleAligns) {
-    explanationParts.push('📌 Pinnacle/sharp respaldando');
+    explanationParts.push('📌 Consenso Sharp');
   }
-  if (pick.consensusStrength >= 0.75) {
-    explanationParts.push(`${Math.round(pick.consensusStrength * 100)}% de libros de acuerdo`);
-  } else if (pick.consensusStrength >= 0.5) {
+  if (pick.bestBookmaker && pick.bestBookmaker !== 'N/A') {
+    explanationParts.push(`🏦 Mejor cuota: ${pick.bestBookmaker}`);
+  }
+  if (pick.consensusStrength >= 0.70) {
     explanationParts.push(`${Math.round(pick.consensusStrength * 100)}% consenso`);
   }
-  if (pick.bookmakerCount >= 5) {
-    explanationParts.push(`${pick.bookmakerCount} casas verificadas`);
+  if (pick.bookmakerCount >= 4) {
+    explanationParts.push(`${pick.bookmakerCount} libros`);
   }
-  const fairProbPct = (pick.marketProbability * 100).toFixed(0);
+  const fairProbPct = (pick.marketProbability * 100).toFixed(1);
 
   const cardBorder = isLive
     ? 'rgba(239,68,68,0.35)'
-    : pick.isFallback
-      ? 'var(--border-subtle)'
-      : pick.confidence === 'alta'
-        ? 'rgba(0,214,143,0.2)'
-        : 'var(--border-subtle)';
+    : pick.isSteamMove
+      ? 'rgba(56,189,248,0.45)'
+      : pick.isFallback
+        ? 'var(--border-subtle)'
+        : pick.confidence === 'alta'
+          ? 'rgba(0,214,143,0.2)'
+          : 'var(--border-subtle)';
 
   return (
     <div
@@ -104,14 +115,24 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
         }} />
       )}
 
-      {/* Top row: sport + league + time + badge */}
+      {/* Top row: sport + league + time + badges */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 8, flexWrap: 'wrap', paddingLeft: pick.confidence === 'alta' && pick.isRecommended ? 6 : 0 }}>
         <span style={{ fontSize: '1rem' }}>{icon}</span>
         <span style={{ fontSize: '0.70rem', color: 'var(--foreground-muted)', fontWeight: 500 }}>{pick.league}</span>
         <span style={{ fontSize: '0.65rem', color: 'var(--foreground-subtle)' }}>
           · <LocalTime isoString={pick.commenceTime} format="datetime" />
         </span>
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5 }}>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+          {pick.isSteamMove && (
+            <span title="Movimiento brusco de cuota en casas sharp (>4% prob implícita)" style={{
+              padding: '2px 7px', borderRadius: 99,
+              background: 'rgba(56,189,248,0.16)', color: '#38bdf8',
+              fontSize: '0.62rem', fontWeight: 800,
+              border: '1px solid rgba(56,189,248,0.35)',
+            }}>
+              🌊 STEAM MOVE
+            </span>
+          )}
           {pick.pinnacleAligns && pick.isRecommended && (
             <span title="Sharp books respaldan este pick" style={{
               padding: '1px 6px', borderRadius: 99,
@@ -179,6 +200,7 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
           </div>
           <div style={{ fontSize: '0.67rem', color: 'var(--foreground-subtle)', marginTop: 2 }}>
             {pick.bestMarket} · {pick.bookmakerCount} {pick.bookmakerCount === 1 ? 'casa' : 'casas'}
+            {fairOddsVal ? ` · Fair Odds: ${fairOddsVal.toFixed(2)}` : ''}
           </div>
         </div>
         <div style={{ textAlign: 'right' }}>
@@ -186,11 +208,11 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
             fontSize: '1.4rem', fontWeight: 800, lineHeight: 1,
             color: pick.valuePercentage > 0 ? 'var(--accent-gold)' : 'var(--foreground-muted)',
           }}>
-            {pick.oddsRange}
+            {pick.bestOdds.toFixed(2)}
           </div>
           {pick.valuePercentage > 0 && (
             <div style={{ fontSize: '0.72rem', color: 'var(--accent-green)', fontWeight: 700, marginTop: 3 }}>
-              +{pick.valuePercentage.toFixed(1)}% valor esperado
+              +{pick.valuePercentage.toFixed(1)}% EV
             </div>
           )}
         </div>
@@ -205,9 +227,9 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
           borderRadius: 8,
           borderLeft: `2px solid ${conf.color}30`,
         }}>
-          {/* Value bar */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: explanationParts.length > 0 ? 6 : 0 }}>
-            <div style={{ flex: 1, height: 3, borderRadius: 2, background: 'var(--border)', overflow: 'hidden' }}>
+          {/* Value bar + Simultaneous Kelly Stake in $ and Units */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: explanationParts.length > 0 ? 6 : 0, flexWrap: 'wrap' }}>
+            <div style={{ flex: 1, minWidth: 80, height: 3, borderRadius: 2, background: 'var(--border)', overflow: 'hidden' }}>
               <div style={{
                 width: `${Math.min(pick.valuePercentage * 7, 100)}%`,
                 height: '100%',
@@ -217,7 +239,7 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
               }} />
             </div>
             <span style={{ fontSize: '0.67rem', color: 'var(--foreground-muted)', whiteSpace: 'nowrap' }}>
-              Kelly: {pick.kellyStake.toFixed(1)}% · Prob. justa: {fairProbPct}%
+              Stake Kelly: <strong style={{ color: 'var(--accent-green)' }}>${suggestedStake} ({simKelly.recommendedUnits.toFixed(2)} U)</strong> · P. Real: {fairProbPct}%
             </span>
           </div>
 
@@ -233,12 +255,21 @@ export default function PickCard({ pick, isLive = false }: { pick: SmartPick; is
                   {part}
                 </span>
               ))}
+              {simKelly.isReducedByExposure && (
+                <span title="Exposición en PENDING > 15% del bankroll: stake ajustado por Kelly Simultáneo" style={{
+                  padding: '1px 7px', borderRadius: 99,
+                  background: 'rgba(255,215,0,0.12)',
+                  color: 'var(--accent-gold)',
+                  border: '1px solid rgba(255,215,0,0.25)',
+                }}>
+                  🛡️ Kelly Simultáneo activo
+                </span>
+              )}
             </div>
           )}
         </div>
       )}
 
-      {/* Fallback explanation */}
       {!pick.isRecommended && (
         <div style={{
           marginTop: 8, fontSize: '0.68rem',

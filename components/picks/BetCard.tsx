@@ -2,7 +2,7 @@
 
 import { useState, useTransition, useEffect } from 'react';
 import { markBetResult, deleteBet, editBet } from '@/app/actions/bets';
-import { CheckCircle2, XCircle, Clock, Loader2, Trash2, Edit3, Save, X } from 'lucide-react';
+import { CheckCircle2, XCircle, Clock, Loader2, Trash2, Edit3, Save, X, MinusCircle } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 interface Bet {
@@ -18,6 +18,8 @@ interface Bet {
   profit: number | null;
   notes?: string | null;
   created_at: string;
+  clvPct?: number | null;
+  closingNoVigOdds?: number | null;
 }
 
 function formatDate(dateStr: string) {
@@ -30,9 +32,13 @@ function formatDate(dateStr: string) {
 
 function StatusBadge({ status }: { status: string }) {
   const cfg = {
-    won:     { bg: 'rgba(0,214,143,0.15)',  color: 'var(--accent-green)', label: 'Ganada',   icon: CheckCircle2 },
-    lost:    { bg: 'rgba(239,68,68,0.15)',   color: 'var(--accent-red)',   label: 'Perdida',  icon: XCircle },
-    pending: { bg: 'rgba(255,215,0,0.15)',  color: 'var(--accent-gold)',   label: 'Pendiente', icon: Clock },
+    won:       { bg: 'rgba(0,214,143,0.15)',  color: 'var(--accent-green)', label: 'Ganada',       icon: CheckCircle2 },
+    half_won:  { bg: 'rgba(0,214,143,0.12)',  color: 'var(--accent-green)', label: '1/2 Ganada',   icon: CheckCircle2 },
+    lost:      { bg: 'rgba(239,68,68,0.15)',   color: 'var(--accent-red)',   label: 'Perdida',      icon: XCircle },
+    half_lost: { bg: 'rgba(239,68,68,0.12)',   color: 'var(--accent-red)',   label: '1/2 Perdida',  icon: XCircle },
+    push:      { bg: 'rgba(59,130,246,0.15)',  color: 'var(--accent-blue)',  label: 'Push / Reemb.', icon: MinusCircle },
+    void:      { bg: 'rgba(59,130,246,0.15)',  color: 'var(--accent-blue)',  label: 'Anulada',      icon: MinusCircle },
+    pending:   { bg: 'rgba(255,215,0,0.15)',  color: 'var(--accent-gold)',   label: 'Pendiente',    icon: Clock },
   }[status] ?? { bg: 'rgba(255,215,0,0.15)', color: 'var(--accent-gold)', label: status, icon: Clock };
   const Icon = cfg.icon;
   return (
@@ -71,20 +77,33 @@ export default function BetCard({ bet }: { bet: Bet }) {
   if (deleted) return null;
 
   const potentialWin = (bet.stake * bet.odds).toFixed(2);
-  const borderColor = localStatus === 'won' ? 'var(--accent-green)' : localStatus === 'lost' ? 'var(--accent-red)' : 'var(--accent-gold)';
+  const borderColor =
+    localStatus === 'won' || localStatus === 'half_won'
+      ? 'var(--accent-green)'
+      : localStatus === 'lost' || localStatus === 'half_lost'
+      ? 'var(--accent-red)'
+      : localStatus === 'push' || localStatus === 'void'
+      ? 'var(--accent-blue)'
+      : 'var(--accent-gold)';
 
   const showFeedback = (type: 'success' | 'error', msg: string) => {
     setFeedback({ type, msg });
     setTimeout(() => setFeedback(null), 3000);
   };
 
-  const handleMark = (result: 'won' | 'lost') => {
+  const handleMark = (result: 'won' | 'lost' | 'push') => {
     startTransition(async () => {
       const res = await markBetResult(bet.id, result, parseFloat(String(bet.stake)), parseFloat(String(bet.odds)));
       if (res.success) {
         setLocalStatus(result);
         setLocalProfit(res.profit ?? null);
-        showFeedback('success', result === 'won' ? `✅ Ganaste $${Math.abs(res.profit ?? 0).toFixed(2)} neto` : '❌ Registrada como perdida');
+        const msg =
+          result === 'won'
+            ? `✅ Ganaste $${Math.abs(res.profit ?? 0).toFixed(2)} neto`
+            : result === 'push'
+            ? '🔄 Reembolsada (Push/Void) al bankroll'
+            : '❌ Registrada como perdida';
+        showFeedback('success', msg);
         router.refresh();
       } else {
         showFeedback('error', res.error ?? 'Error desconocido');
@@ -176,7 +195,24 @@ export default function BetCard({ bet }: { bet: Bet }) {
           </div>
           <div>
             <div style={{ fontSize: '0.62rem', color: 'var(--foreground-subtle)', textTransform: 'uppercase', marginBottom: 2 }}>Cuota</div>
-            <div style={{ fontSize: '0.82rem', fontWeight: 700, color: 'var(--accent-gold)' }}>{parseFloat(String(bet.odds)).toFixed(2)}</div>
+            <div style={{ fontSize: '0.82rem', fontWeight: 700, color: 'var(--accent-gold)', display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+              <span>{parseFloat(String(bet.odds)).toFixed(2)}</span>
+              {bet.clvPct !== null && bet.clvPct !== undefined && (
+                <span
+                  title={bet.closingNoVigOdds ? `Closing No-Vig Fair Odds: @${bet.closingNoVigOdds.toFixed(2)}` : 'Closing Line Value'}
+                  style={{
+                    fontSize: '0.62rem',
+                    padding: '1px 5px',
+                    borderRadius: 4,
+                    background: bet.clvPct >= 0 ? 'rgba(0,214,143,0.14)' : 'rgba(239,68,68,0.14)',
+                    color: bet.clvPct >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
+                    fontWeight: 700,
+                  }}
+                >
+                  {bet.clvPct >= 0 ? '+' : ''}{bet.clvPct.toFixed(1)}% CLV
+                </span>
+              )}
+            </div>
           </div>
           <div>
             <div style={{ fontSize: '0.62rem', color: 'var(--foreground-subtle)', textTransform: 'uppercase', marginBottom: 2 }}>Apostado</div>
@@ -192,7 +228,7 @@ export default function BetCard({ bet }: { bet: Bet }) {
             Posible: <strong style={{ color: 'var(--accent-green)' }}>${potentialWin}</strong>
           </div>
         ) : localStatus !== 'pending' ? (
-          <div style={{ fontSize: '0.78rem', fontWeight: 700, color: (localProfit ?? 0) >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+          <div style={{ fontSize: '0.78rem', fontWeight: 700, color: (localProfit ?? 0) > 0 ? 'var(--accent-green)' : (localProfit ?? 0) < 0 ? 'var(--accent-red)' : 'var(--accent-blue)' }}>
             Profit: {(localProfit ?? 0) >= 0 ? '+' : ''}{(localProfit ?? 0).toFixed(2)}
           </div>
         ) : null}
@@ -218,18 +254,22 @@ export default function BetCard({ bet }: { bet: Bet }) {
           ) : (
             <>
               <button onClick={() => handleMark('won')} disabled={isPending}
-                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, padding: '0.45rem', borderRadius: 7, border: 'none', background: 'rgba(0,214,143,0.1)', color: 'var(--accent-green)', cursor: 'pointer', fontWeight: 700, fontSize: '0.78rem' }}>
+                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, padding: '0.45rem', borderRadius: 7, border: 'none', background: 'rgba(0,214,143,0.1)', color: 'var(--accent-green)', cursor: 'pointer', fontWeight: 700, fontSize: '0.75rem' }}>
                 {isPending ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <CheckCircle2 size={13} />} Ganada
               </button>
               <button onClick={() => handleMark('lost')} disabled={isPending}
-                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, padding: '0.45rem', borderRadius: 7, border: 'none', background: 'rgba(239,68,68,0.1)', color: 'var(--accent-red)', cursor: 'pointer', fontWeight: 700, fontSize: '0.78rem' }}>
+                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, padding: '0.45rem', borderRadius: 7, border: 'none', background: 'rgba(239,68,68,0.1)', color: 'var(--accent-red)', cursor: 'pointer', fontWeight: 700, fontSize: '0.75rem' }}>
                 {isPending ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <XCircle size={13} />} Perdida
+              </button>
+              <button onClick={() => handleMark('push')} disabled={isPending} title="Reembolso / Empate (Push / Void)"
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, padding: '0.45rem 0.6rem', borderRadius: 7, border: 'none', background: 'rgba(59,130,246,0.1)', color: 'var(--accent-blue)', cursor: 'pointer', fontWeight: 700, fontSize: '0.75rem' }}>
+                <MinusCircle size={13} /> Push
               </button>
               <button onClick={() => setEditing(true)} disabled={isPending}
                 style={{ padding: '0.45rem 0.6rem', borderRadius: 7, border: '1px solid var(--border)', background: 'transparent', color: 'var(--foreground-muted)', cursor: 'pointer' }}>
                 <Edit3 size={13} />
               </button>
-              <button onClick={handleDelete} disabled={isPending}
+              <button onClick={() => handleDelete} disabled={isPending}
                 style={{ padding: '0.45rem 0.6rem', borderRadius: 7, border: 'none', background: 'rgba(239,68,68,0.08)', color: 'var(--accent-red)', cursor: 'pointer' }}>
                 <Trash2 size={13} />
               </button>

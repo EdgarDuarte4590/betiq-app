@@ -3,20 +3,21 @@
 import { useState, useEffect, useTransition } from 'react';
 import { useBankrollStore } from '@/lib/store/bankrollStore';
 import { createClient } from '@/lib/supabase/client';
-import { CheckCircle2, X, Loader2 } from 'lucide-react';
+import { calculateSimultaneousKelly } from '@/lib/algorithms/value-bet-calculator';
+import { CheckCircle2, X, Loader2, ShieldAlert } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { usePathname } from 'next/navigation';
 
 /**
- * Global Bet Modal — mounted once in layout.tsx so the modal
- * is available from ANY page (dashboard, value-bets, picks, etc.)
+ * Global Bet Modal — conectado en tiempo real al Bankroll y Exposición Pendiente
+ * para pre-llenar el Stake Recomendado con Kelly Simultáneo en Moneda ($) y Unidades (U).
  */
 export default function GlobalBetModal() {
   const pathname = usePathname();
   const isAuthPage = pathname === '/login' || pathname === '/register';
 
   const {
-    bankroll, isModalOpen, closeModal, draftBet,
+    bankroll, pendingExposure, isModalOpen, closeModal, draftBet,
     user, syncWithSupabase, updateBankrollInDB,
   } = useBankrollStore();
 
@@ -34,13 +35,20 @@ export default function GlobalBetModal() {
     setMounted(true);
   }, []);
 
-  // Pre-fill form with draft
+  // Pre-fill form with draft and Simultaneous Kelly
   useEffect(() => {
     if (draftBet) {
       setMatch(draftBet.match);
       setOdds(draftBet.odds);
-      setStake(draftBet.stake);
-      // Derive market from pick label so Over/Under bets are categorized correctly
+
+      const safeBankroll = bankroll > 0 ? bankroll : 1000;
+      if (draftBet.kellyPct && draftBet.kellyPct > 0) {
+        const sim = calculateSimultaneousKelly(draftBet.kellyPct, safeBankroll, pendingExposure);
+        setStake(sim.recommendedStakeCurrency > 0 ? sim.recommendedStakeCurrency.toFixed(2) : draftBet.stake);
+      } else {
+        setStake(draftBet.stake);
+      }
+
       const pick = (draftBet.pick || '').toLowerCase();
       if (pick.includes('over') || pick.includes('under') || /[0-9]+\.[0-9]+/.test(pick)) {
         setMarket('Over/Under');
@@ -54,10 +62,11 @@ export default function GlobalBetModal() {
     } else {
       setMatch('');
       setOdds('2.00');
-      setStake('50');
+      const defaultUnit = bankroll > 0 ? (bankroll * 0.01).toFixed(2) : '20';
+      setStake(defaultUnit);
       setMarket('H2H');
     }
-  }, [draftBet, isModalOpen]);
+  }, [draftBet, isModalOpen, bankroll, pendingExposure]);
 
   // Sync bankroll on mount
   useEffect(() => {
@@ -117,7 +126,7 @@ export default function GlobalBetModal() {
         return;
       }
 
-      await updateBankrollInDB(bankroll - stakeNum);
+      await updateBankrollInDB(Number((bankroll - stakeNum).toFixed(2)), stakeNum);
       closeModal();
       showToast('success', `✅ Apuesta registrada: $${stakeNum.toFixed(2)} en ${match}`);
     });
@@ -125,10 +134,13 @@ export default function GlobalBetModal() {
 
   if (isAuthPage || !mounted) return null;
 
+  const safeBankroll = bankroll > 0 ? bankroll : 1000;
   const stakeNum = parseFloat(stake) || 0;
   const oddsNum = parseFloat(odds) || 0;
   const potentialWin = stakeNum > 0 && oddsNum > 0 ? (stakeNum * oddsNum).toFixed(2) : '0.00';
-  const bankrollPct = bankroll > 0 ? ((stakeNum / bankroll) * 100).toFixed(1) : '0';
+  const bankrollPct = safeBankroll > 0 ? ((stakeNum / safeBankroll) * 100).toFixed(2) : '0';
+  const stakeUnits = safeBankroll > 0 ? (stakeNum / (safeBankroll * 0.01)).toFixed(2) : '0.00';
+  const exposureRatioPct = safeBankroll > 0 ? (pendingExposure / safeBankroll) * 100 : 0;
 
   return (
     <>
@@ -163,7 +175,7 @@ export default function GlobalBetModal() {
           animation: 'fadeIn 0.2s ease',
         }}>
           <div className="card" style={{
-            width: '100%', maxWidth: 440,
+            width: '100%', maxWidth: 450,
             background: 'var(--background-card)',
             border: '1px solid var(--border)',
             boxShadow: '0 24px 60px rgba(0,0,0,0.5)',
@@ -189,27 +201,61 @@ export default function GlobalBetModal() {
             {/* Draft pick summary */}
             {draftBet?.pick && (
               <div style={{
-                marginBottom: '1.25rem',
+                marginBottom: '1rem',
                 padding: '0.75rem 1rem',
                 background: 'linear-gradient(135deg, rgba(255,215,0,0.06), rgba(0,214,143,0.04))',
                 borderRadius: 10,
                 border: '1px solid rgba(255,215,0,0.18)',
               }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
                   <div>
-                    <div style={{ fontSize: '0.68rem', color: 'var(--foreground-muted)', marginBottom: 3 }}>Pick sugerido por BetIQ</div>
+                    <div style={{ fontSize: '0.68rem', color: 'var(--foreground-muted)', marginBottom: 3 }}>
+                      Pick sugerido por BetIQ {draftBet.fairOdds ? `· Fair Odds: ${draftBet.fairOdds.toFixed(2)}` : ''}
+                    </div>
                     <div style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--accent-gold)' }}>⭐ {draftBet.pick}</div>
                   </div>
-                  {draftBet.confidence && (
-                    <span style={{
-                      padding: '2px 9px', borderRadius: 99,
-                      background: draftBet.confidence === 'alta' ? 'rgba(0,214,143,0.15)' : draftBet.confidence === 'media' ? 'rgba(255,215,0,0.15)' : 'rgba(148,163,184,0.12)',
-                      color: draftBet.confidence === 'alta' ? 'var(--accent-green)' : draftBet.confidence === 'media' ? 'var(--accent-gold)' : '#94a3b8',
-                      fontSize: '0.65rem', fontWeight: 700,
-                    }}>
-                      {draftBet.confidence === 'alta' ? '🔥 Alta' : draftBet.confidence === 'media' ? '⚡ Media' : '📊 Baja'} confianza
-                    </span>
-                  )}
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                    {draftBet.isSteamMove && (
+                      <span style={{
+                        padding: '2px 7px', borderRadius: 99,
+                        background: 'rgba(56,189,248,0.16)', color: '#38bdf8',
+                        fontSize: '0.62rem', fontWeight: 800,
+                      }}>
+                        🌊 STEAM
+                      </span>
+                    )}
+                    {draftBet.confidence && (
+                      <span style={{
+                        padding: '2px 9px', borderRadius: 99,
+                        background: draftBet.confidence === 'alta' ? 'rgba(0,214,143,0.15)' : draftBet.confidence === 'media' ? 'rgba(255,215,0,0.15)' : 'rgba(148,163,184,0.12)',
+                        color: draftBet.confidence === 'alta' ? 'var(--accent-green)' : draftBet.confidence === 'media' ? 'var(--accent-gold)' : '#94a3b8',
+                        fontSize: '0.65rem', fontWeight: 700,
+                      }}>
+                        {draftBet.confidence === 'alta' ? '🔥 Alta' : draftBet.confidence === 'media' ? '⚡ Media' : '📊 Baja'}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Simultaneous Kelly Exposure Warning */}
+            {exposureRatioPct > 15 && (
+              <div style={{
+                marginBottom: '1rem',
+                padding: '0.6rem 0.85rem',
+                borderRadius: 8,
+                background: 'rgba(255,215,0,0.08)',
+                border: '1px solid rgba(255,215,0,0.25)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                fontSize: '0.74rem',
+                color: 'var(--accent-gold)',
+              }}>
+                <ShieldAlert size={16} style={{ flexShrink: 0 }} />
+                <div>
+                  <strong>Kelly Simultáneo Activo:</strong> Tienes ${pendingExposure.toFixed(2)} ({exposureRatioPct.toFixed(1)}%) en apuestas pendientes (&gt;15%). El stake sugerido se redujo para proteger tu bankroll.
                 </div>
               </div>
             )}
@@ -238,24 +284,18 @@ export default function GlobalBetModal() {
                   <optgroup label="Resultado">
                     <option value="H2H">Ganador (1X2 / H2H)</option>
                     <option value="Empate">Empate</option>
+                    <option value="Over/Under">Over/Under (Totales)</option>
                   </optgroup>
-                  <optgroup label="Mundial / Selecciones">
+                  <optgroup label="Fútbol">
                     <option value="Goles +1.5">Over/Under Goles (1.5)</option>
                     <option value="Goles +2.5">Over/Under Goles (2.5)</option>
                     <option value="Ambos Anotan">Ambos Equipos Anotan (BTTS)</option>
-                    <option value="Clasificación">Clasificación de Grupo</option>
                     <option value="Tarjetas">Total Tarjetas</option>
                     <option value="Corners">Tiros de Esquina</option>
                   </optgroup>
-                  <optgroup label="Básquetbol">
+                  <optgroup label="Básquetbol / Béisbol">
                     <option value="Puntos +">Over/Under Puntos</option>
-                    <option value="Puntos Jugador">Puntos de Jugador</option>
-                    <option value="Asistencias">Asistencias Jugador</option>
-                  </optgroup>
-                  <optgroup label="Béisbol">
                     <option value="Carreras +">Over/Under Carreras</option>
-                    <option value="Hits +">Over/Under Hits</option>
-                    <option value="Innings">Resultado por Inning</option>
                   </optgroup>
                   <optgroup label="Otro">
                     <option value="Otro">Otro mercado</option>
@@ -267,7 +307,7 @@ export default function GlobalBetModal() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.875rem' }}>
                 <div>
                   <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--foreground-muted)', marginBottom: 5 }}>
-                    Cuota <span style={{ color: 'var(--foreground-subtle)', fontSize: '0.7rem' }}>(1.50–5.00)</span>
+                    Cuota Tomada <span style={{ color: 'var(--foreground-subtle)', fontSize: '0.7rem' }}>(1.45–5.50)</span>
                   </label>
                   <input
                     type="number"
@@ -275,20 +315,16 @@ export default function GlobalBetModal() {
                     min="1.01"
                     value={odds}
                     onChange={e => setOdds(e.target.value)}
-                    style={{ width: '100%', padding: '0.7rem', borderRadius: 8, border: `1px solid ${oddsNum < 1.5 || oddsNum > 5.0 ? 'var(--accent-gold)' : 'var(--border)'}`, background: 'var(--background-secondary)', color: 'var(--foreground)' }}
+                    style={{ width: '100%', padding: '0.7rem', borderRadius: 8, border: `1px solid ${oddsNum < 1.45 || oddsNum > 5.5 ? 'var(--accent-gold)' : 'var(--border)'}`, background: 'var(--background-secondary)', color: 'var(--foreground)' }}
                   />
-                  {(oddsNum < 1.5 || oddsNum > 5.0) && (
-                    <div style={{ fontSize: '0.7rem', color: 'var(--accent-gold)', marginTop: 4 }}>
-                      ⚠ Fuera del rango recomendado (1.50–5.00)
-                    </div>
-                  )}
                 </div>
                 <div>
                   <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--foreground-muted)', marginBottom: 5 }}>
-                    Monto ($) <span style={{ color: 'var(--foreground-subtle)', fontSize: '0.7rem' }}>{bankrollPct}% bankroll</span>
+                    Stake ($) <span style={{ color: 'var(--accent-gold)', fontSize: '0.7rem', fontWeight: 700 }}>{stakeUnits} U ({bankrollPct}%)</span>
                   </label>
                   <input
                     type="number"
+                    step="0.5"
                     min="1"
                     value={stake}
                     onChange={e => setStake(e.target.value)}
@@ -300,7 +336,7 @@ export default function GlobalBetModal() {
               {/* Resumen */}
               {stakeNum > 0 && oddsNum > 0 && (
                 <div style={{ padding: '0.75rem', background: 'rgba(0,0,0,0.2)', borderRadius: 8, display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem' }}>
-                  <span style={{ color: 'var(--foreground-muted)' }}>Ganancia posible:</span>
+                  <span style={{ color: 'var(--foreground-muted)' }}>Retorno potencial ({stakeUnits} U):</span>
                   <span style={{ fontWeight: 700, color: 'var(--accent-green)' }}>${potentialWin}</span>
                 </div>
               )}

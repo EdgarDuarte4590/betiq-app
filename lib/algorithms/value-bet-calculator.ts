@@ -1,81 +1,196 @@
 /**
- * BetIQ Value Bet Calculator v3.1
+ * BetIQ Quantitative Value Bet Calculator v4.0
  *
- * Motor profesional de análisis multi-bookmaker.
- * - Sistema de ZONAS DE CUOTAS con prioridad inteligente:
- *     Zona A (primaria)  : 1.50–1.95 → siempre prioridad máxima
- *     Zona B (secundaria): 1.96–2.50 → solo si value% >= SECONDARY_VALUE_THRESHOLD
- *     Zona C (alto valor): >2.50     → solo si value% >= HIGH_VALUE_THRESHOLD Y pinnacleAligns
- * - Limite diario configurable: 5–10 picks de alta calidad (getTopDailyPicks)
- * - Consolida resultados: UNA recomendación por partido/pick (no repetidas por casa)
- * - Muestra rango de cuotas (min–max) en vez de una por bookmaker
- * - Soporta: H2H (1X2 + Empate), Totals (Over/Under)
+ * Motor cuantitativo institucional multi-bookmaker:
+ * - Power Method Devigging (búsqueda binaria en 15 iteraciones) para corregir el Favorite-Longshot Bias
+ * - Consenso Sharp Ponderado: Pinnacle (50%), Betfair Exchange / Matchbook (30%), Circa / Bookmaker (20%)
+ * - Fallback por Media Armónica de las 4 casas con menor overround (margen) cuando no hay casa sharp directa
+ * - Criterio de Kelly Fraccionado (Quarter Kelly α = 0.25) con Hard Cap del 3% del bankroll por pick
+ * - Kelly Simultáneo con ajuste automático de exposición (>15% bankroll comprometido en PENDING)
+ * - Degradación elegante (Graceful Degradation) con timeout estricto (<3s) para proveedores secundarios
  */
 
 import type { OddEvent } from '@/lib/apis/odds-api';
+import { getTeamForm } from '@/lib/apis/sofascore';
+import { searchNBATeam, getNBATeamRecord } from '@/lib/apis/balldontlie';
 
-// ========== CONFIGURACIÓN DE SHARP BOOKS ==========
+// ========== CONFIGURACIÓN DE CONSENSO SHARP PONDERADO ==========
 
-// Pesos de bookmakers: sharp books valen más en el consenso de probabilidad.
-// Los que no están en esta lista reciben peso 1.0 (baseline).
+/**
+ * Pesos de madurez de mercado para el Consenso Sharp Institucional:
+ * - Pinnacle: 50% (0.50)
+ * - Betfair Exchange / Matchbook: 30% (0.30)
+ * - Circa / Bookmaker / LowVig: 20% (0.20)
+ */
+const SHARP_TIER_WEIGHTS: Record<string, number> = {
+  'pinnacle':         0.50,
+  'betfair_ex_eu':    0.30,
+  'betfair_ex_uk':    0.30,
+  'betfair_ex_au':    0.30,
+  'matchbook':        0.30,
+  'bookmaker':        0.20,
+  'circa':            0.20,
+  'lowvig':           0.20,
+};
+
+const SHARP_BOOK_KEYS = new Set(Object.keys(SHARP_TIER_WEIGHTS));
+
+// Pesos generales para telemetría / ponderación secundaria
 const BOOKMAKER_WEIGHTS: Record<string, number> = {
-  'pinnacle':         3.0,  // El sharp book por excelencia
-  'betfair_ex_eu':    2.5,  // Exchange — cuotas sin margen
+  'pinnacle':         3.0,
+  'betfair_ex_eu':    2.5,
   'betfair_ex_uk':    2.5,
-  'bookmaker':        2.0,  // Conocido por aceptar ganadores
+  'matchbook':        2.5,
+  'bookmaker':        2.0,
   'betsson':          1.5,
   'unibet_eu':        1.5,
   'williamhill':      1.3,
   'bet365':           1.2,
-  'draftkings':       0.8,  // Square book, mercado US menos eficiente
+  'draftkings':       0.8,
   'fanduel':          0.8,
   'bovada':           0.7,
 };
 
-function getBookmakerWeight(bookmakerKey: string): number {
+export function getBookmakerWeight(bookmakerKey: string): number {
   return BOOKMAKER_WEIGHTS[bookmakerKey] ?? 1.0;
 }
 
-// ========== FÓRMULAS ==========
+// ========== FÓRMULAS CUANTITATIVAS (POWER METHOD DEVIGGING & KELLY) ==========
 
 /**
- * Elimina el overround (margen del bookmaker) de un conjunto de cuotas decimales.
- * Método multiplicativo: normaliza para que las probs implícitas sumen exactamente 1.
- * 
- * @param odds - Array de cuotas decimales de TODOS los outcomes del mismo mercado
- * @returns Array de probabilidades "justas" (sin margen) en el mismo orden
+ * Power Method Devigging:
+ * Dadas las cuotas decimales O_1, O_2, ..., O_n con margen bruto sum(1/O_i) > 1,
+ * resuelve numéricamente mediante búsqueda binaria en 15 iteraciones el exponente
+ * de potencia k > 1 tal que:
+ *   sum_{i=1}^n (1 / O_i)^k = 1
+ *
+ * Corrige el Favorite-Longshot Bias donde las casas cargan mayor margen relativo
+ * en los underdogs/longshots que en los favoritos.
  */
-export function removeVig(odds: number[]): number[] {
-  const impliedProbs = odds.map(o => 1 / o);
-  const overround = impliedProbs.reduce((s, p) => s + p, 0);
-  return impliedProbs.map(p => p / overround);
+export function powerDevig(odds: number[]): number[] {
+  if (!odds || odds.length === 0) return [];
+  const validOdds = odds.map(o => (o > 1.0001 ? o : 1.0001));
+  const impliedProbs = validOdds.map(o => 1 / o);
+  const grossOverround = impliedProbs.reduce((s, p) => s + p, 0);
+
+  if (grossOverround <= 0) return odds.map(() => 0);
+
+  // Si no hay overround (> 1), normalizar multiplicativamente
+  if (grossOverround <= 1.0001) {
+    return impliedProbs.map(p => p / grossOverround);
+  }
+
+  // Búsqueda binaria en 15 iteraciones para hallar k > 1 tal que sum((1/O_i)^k) = 1
+  let low = 1.0;
+  let high = 15.0;
+
+  for (let iter = 0; iter < 15; iter++) {
+    const mid = (low + high) / 2;
+    let sumPow = 0;
+    for (let i = 0; i < impliedProbs.length; i++) {
+      sumPow += Math.pow(impliedProbs[i], mid);
+    }
+    if (sumPow > 1.0) {
+      // Necesitamos un exponente mayor para reducir probabilidades en (0,1)
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+
+  const k = (low + high) / 2;
+  const rawTrueProbs = impliedProbs.map(p => Math.pow(p, k));
+  const normSum = rawTrueProbs.reduce((s, p) => s + p, 0) || 1;
+  return rawTrueProbs.map(p => p / normSum);
 }
 
+/**
+ * Elimina el overround (margen del bookmaker) de un conjunto de cuotas decimales
+ * utilizando Power Method Devigging institucional.
+ */
+export function removeVig(odds: number[]): number[] {
+  return powerDevig(odds);
+}
+
+/**
+ * Calcula el Valor Esperado en porcentaje:
+ * EV% = ((P_true * O_soft) - 1) * 100
+ */
 export function calculateValuePercentage(winProbability: number, decimalOdds: number): number {
   if (winProbability <= 0 || decimalOdds <= 1) return 0;
   return ((winProbability * decimalOdds) - 1) * 100;
 }
 
-// Kelly criterion actualizado para no apostar sin edge
-// Kelly minimum threshold: stakes below this % are not worth the effort
-const KELLY_MIN_THRESHOLD = 0.5;
+// Kelly minimum threshold (%) y Hard Cap institucional (3.0% del bankroll por pick)
+const KELLY_MIN_THRESHOLD = 0.25;
+export const KELLY_HARD_CAP_PCT = 3.0;
 
+/**
+ * Criterio de Kelly Fraccionado (Quarter Kelly α = 0.25 por defecto)
+ * con límite máximo de exposición (Hard Cap) del 3.0% del bankroll por pick.
+ *
+ * f* = α * max(0, (P_true * (O_soft - 1) - (1 - P_true)) / (O_soft - 1))
+ */
 export function calculateKellyCriterion(
   winProbability: number,
   decimalOdds: number,
   fraction: number = 0.25
 ): number {
-  const valuePct = calculateValuePercentage(winProbability, decimalOdds);
-  if (valuePct <= 0) return 0;
-  
-  const q = 1 - winProbability;
+  if (winProbability <= 0 || winProbability >= 1 || decimalOdds <= 1) return 0;
+
   const b = decimalOdds - 1;
-  if (b <= 0) return 0;
-  const f_star = ((b * winProbability) - q) / b;
-  if (f_star <= 0) return 0;  // Sin edge positivo → Kelly = 0
-  const kellyPct = Math.min((f_star * fraction) * 100, 5); // Cap en 5% del bankroll por seguridad
-  // Si el stake sugerido es menor al threshold mínimo, no vale la pena
-  return kellyPct < KELLY_MIN_THRESHOLD ? 0 : kellyPct;
+  const q = 1 - winProbability;
+  const fStar = ((winProbability * b) - q) / b;
+
+  if (fStar <= 0) return 0;
+
+  const kellyPct = Math.min(fStar * fraction * 100, KELLY_HARD_CAP_PCT);
+  return kellyPct < KELLY_MIN_THRESHOLD ? 0 : Number(kellyPct.toFixed(2));
+}
+
+/**
+ * Kelly Simultáneo: ajusta el stake recomendado según la exposición actual del usuario
+ * en apuestas PENDING. Si el usuario tiene más del 15% del bankroll comprometido,
+ * reduce proporcionalmente la exposición para proteger contra riesgo de ruina correlacionado.
+ */
+export function calculateSimultaneousKelly(
+  baseKellyPct: number,
+  bankroll: number,
+  pendingExposureCurrency: number = 0
+): {
+  adjustedKellyPct: number;
+  recommendedStakeCurrency: number;
+  recommendedUnits: number; // 1 Unidad = 1% del bankroll
+  exposureRatio: number;
+  isReducedByExposure: boolean;
+} {
+  const safeBankroll = bankroll > 0 ? bankroll : 1000;
+  const exposureRatio = safeBankroll > 0 ? pendingExposureCurrency / safeBankroll : 0;
+
+  let scaleFactor = 1.0;
+  let isReducedByExposure = false;
+
+  // Si hay más del 15% del bankroll comprometido en apuestas PENDING, escalar hacia abajo
+  if (exposureRatio > 0.15) {
+    isReducedByExposure = true;
+    // Reducción progresiva: a 15% factor=1.0, a 50%+ factor=0.35
+    scaleFactor = Math.max(0.35, 1 - (exposureRatio - 0.15) * 1.5);
+  }
+
+  const adjustedKellyPct = Math.min(
+    KELLY_HARD_CAP_PCT,
+    Number((baseKellyPct * scaleFactor).toFixed(2))
+  );
+  const recommendedStakeCurrency = Number(((safeBankroll * adjustedKellyPct) / 100).toFixed(2));
+  const recommendedUnits = Number(adjustedKellyPct.toFixed(2));
+
+  return {
+    adjustedKellyPct,
+    recommendedStakeCurrency,
+    recommendedUnits,
+    exposureRatio,
+    isReducedByExposure,
+  };
 }
 
 // ========== TYPES ==========
@@ -84,17 +199,21 @@ export interface ValueBetOpportunity {
   eventId: string;
   event: string;
   pick: string;
-  market: string;           // 'H2H', 'Empate', 'Over 2.5', 'Under 2.5', etc.
+  market: string;           // 'H2H', 'Empate', 'Over/Under'
   oddsMin: number;          // Cuota más baja del mercado
-  oddsMax: number;          // Cuota más alta (la mejor para el apostador)
-  oddsBest: number;         // La mejor cuota encontrada
-  bestBookmaker: string;    // El bookmaker que ofrece la mejor cuota
+  oddsMax: number;          // Cuota más alta
+  oddsBest: number;         // Mejor cuota disponible (O_soft)
+  fairOdds: number;         // Cuota justa sin margen (1 / P_true)
+  bestBookmaker: string;    // Casa que ofrece la mejor cuota
   bookmakerCount: number;   // Cuántas casas ofrecen este pick
-  marketProbability: number;
-  valuePercentage: number;
-  kellyStake: number;
-  consensusStrength: number; // 0-1: fracción de libros cuya prob fair supera el 50%
-  pinnacleAligns: boolean;   // true si Pinnacle/Betfair respaldan el pick
+  marketProbability: number;// P_true calculada por Consenso Sharp + Power Devigging
+  valuePercentage: number;  // EV%
+  kellyStake: number;       // Quarter Kelly % (cap 3%)
+  consensusStrength: number;// 0-1: fuerza de acuerdo del mercado
+  pinnacleAligns: boolean;  // true si casas sharp respaldan el valor o favoritismo
+  usedSharpConsensus: boolean; // true si había casa sharp directa, false si usó media armónica
+  isSteamMove?: boolean;    // true si se detectó caída brusca en sharp books (>4% en <30m)
+  steamMoveDelta?: number;  // magnitud del movimiento de probabilidad implícita (%)
   sport: string;
   league: string;
   commenceTime: string;
@@ -106,19 +225,24 @@ export interface SmartPick {
   sport: string;
   league: string;
   commenceTime: string;
-  bestPick: string;       // "Gana Arsenal", "Over 2.5", "Empate"
-  bestMarket: string;     // "H2H", "Over/Under", "Empate"
-  oddsRange: string;      // "1.85–2.10"
+  bestPick: string;         // "Gana Arsenal", "Over 2.5", "Empate"
+  bestMarket: string;       // "H2H", "Over/Under", "Empate"
+  oddsRange: string;        // "1.85–2.10"
   bestOdds: number;
+  fairOdds: number;         // Cuota justa sin margen (1 / P_true)
+  bestBookmaker: string;    // Casa de apuestas con la mejor cuota
   valuePercentage: number;
   kellyStake: number;
   marketProbability: number;
   confidence: 'alta' | 'media' | 'baja';
   bookmakerCount: number;
-  consensusStrength: number; // 0-1: fracción de libros que coinciden en el pick
-  pinnacleAligns: boolean;   // true si sharp books respaldan el pick
-  isFallback: boolean;       // true = no tiene value edge real, solo la mejor opción disponible
-  isRecommended: boolean;    // true = cumple criterios estrictos (zonas/value) para notificación
+  consensusStrength: number;
+  pinnacleAligns: boolean;
+  usedSharpConsensus?: boolean;
+  isSteamMove?: boolean;
+  steamMoveDelta?: number;
+  isFallback: boolean;
+  isRecommended: boolean;
 }
 
 // ========== DEPORTES PRINCIPALES ==========
@@ -133,7 +257,6 @@ export function isMainSport(sportKey: string): boolean {
 
 /**
  * Verifica si un evento se juega hoy en zona horaria de México (CST).
- * Compara la fecha del commence_time con la fecha actual en America/Mexico_City.
  */
 export function isTodayInMexico(commenceTime: string): boolean {
   const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Mexico_City' });
@@ -142,55 +265,33 @@ export function isTodayInMexico(commenceTime: string): boolean {
   return eventStr === todayStr;
 }
 
-// ========== HELPERS DE MERCADOS ==========
-
-interface ParsedMarketPick {
-  fairProb: number;
-  bestOdds: number;
-  bookmakerCount: number; // Count of valid odds for this pick
-  consensusStrength: number; // fraction of books whose fair prob > 0.5 for this outcome
-  pinnacleAligns: boolean;   // whether sharp books (Pinnacle/Betfair) back this pick
-  oddsArray: number[];
-  validOdds: number[];
-  bestBookmaker: string;
-}
-
-// Sharp books used for consensus validation
-const SHARP_BOOK_KEYS = new Set(['pinnacle', 'betfair_ex_eu', 'betfair_ex_uk', 'bookmaker']);
-
 // ========== SISTEMA DE ZONAS DE CUOTAS ==========
-// Zona A (primaria)  : cuotas realistas con alta probabilidad implícita
-// Zona B (secundaria): visibles solo con value estadístico real
-// Zona C (alto valor): visibles solo con respaldo de sharp books
-const ODDS_ZONE_A_MIN = 1.50;
+
+const ODDS_ZONE_A_MIN = 1.45;
 const ODDS_ZONE_A_MAX = 1.95;
-const ODDS_ZONE_B_MAX = 2.50;
-const ODDS_ZONE_C_MAX = 5.00;
+const ODDS_ZONE_B_MAX = 2.60;
+const ODDS_ZONE_C_MAX = 5.50;
 
-// Thresholds de value% para cuotas fuera de la zona primaria
-const SECONDARY_VALUE_THRESHOLD = 5.0;  // Zona B: necesita al menos +5% de value
-const HIGH_VALUE_THRESHOLD      = 10.0; // Zona C: necesita al menos +10% de value + pinnacle
+const SECONDARY_VALUE_THRESHOLD = 3.0; // Zona B: al menos +3.0% EV
+const HIGH_VALUE_THRESHOLD      = 6.5; // Zona C: al menos +6.5% EV + respaldo sharp
 
-/** Verifica si una cuota está en la zona primaria (1.50–1.95) */
+/** Verifica si una cuota está en la zona primaria (1.45–1.95) */
 export function isOddsZoneA(odds: number): boolean {
   return odds >= ODDS_ZONE_A_MIN && odds <= ODDS_ZONE_A_MAX;
 }
 
-/** Verifica si una cuota está en zona secundaria (1.96–2.50) */
+/** Verifica si una cuota está en zona secundaria (1.96–2.60) */
 export function isOddsZoneB(odds: number): boolean {
   return odds > ODDS_ZONE_A_MAX && odds <= ODDS_ZONE_B_MAX;
 }
 
-/** Verifica si una cuota está en zona alta (>2.50) */
+/** Verifica si una cuota está en zona alta (2.61–5.50) */
 export function isOddsZoneC(odds: number): boolean {
   return odds > ODDS_ZONE_B_MAX && odds <= ODDS_ZONE_C_MAX;
 }
 
 /**
- * Determina si una cuota es válida para mostrar dado el value y el respaldo de sharp books.
- * - Zona A (1.50–1.95): siempre válida si supera el minValue del caller
- * - Zona B (1.96–2.50): válida si value% >= SECONDARY_VALUE_THRESHOLD
- * - Zona C (>2.50)    : válida si value% >= HIGH_VALUE_THRESHOLD Y pinnacleAligns
+ * Determina si una cuota es válida según zona, EV% y respaldo sharp.
  */
 export function isOddsAcceptable(
   odds: number,
@@ -198,245 +299,311 @@ export function isOddsAcceptable(
   pinnacleAligns: boolean
 ): boolean {
   if (odds < ODDS_ZONE_A_MIN || odds > ODDS_ZONE_C_MAX) return false;
-  if (isOddsZoneA(odds)) return true;
+  if (isOddsZoneA(odds)) return valuePercentage > 0;
   if (isOddsZoneB(odds)) return valuePercentage >= SECONDARY_VALUE_THRESHOLD;
   if (isOddsZoneC(odds)) return valuePercentage >= HIGH_VALUE_THRESHOLD && pinnacleAligns;
   return false;
 }
 
-/**
- * Calcula la zona de una cuota como número (1=A, 2=B, 3=C).
- * Usado para el sorting: zona A siempre tiene prioridad.
- */
 export function getOddsZone(odds: number): 1 | 2 | 3 {
   if (isOddsZoneA(odds)) return 1;
   if (isOddsZoneB(odds)) return 2;
   return 3;
 }
 
-// Alias interno para validación de rango mínimo (compatibilidad con helpers)
 const MIN_ODDS = ODDS_ZONE_A_MIN;
 const MAX_ODDS = ODDS_ZONE_C_MAX;
 
-function parseH2HMarket(event: OddEvent): Map<string, ParsedMarketPick> {
-  const bkFairProbs = new Map<string, Record<string, number>>();
-  for (const bk of event.bookmakers) {
-    const h2h = bk.markets?.find(m => m.key === 'h2h');
-    if (!h2h?.outcomes || h2h.outcomes.length === 0) continue;
-    const prices = h2h.outcomes.map(o => o.price);
-    const names = h2h.outcomes.map(o => o.name);
-    const fairProbs = removeVig(prices);
-    const probMap: Record<string, number> = {};
-    for (let i = 0; i < names.length; i++) {
-        probMap[names[i]] = fairProbs[i];
-    }
-    bkFairProbs.set(bk.key, probMap);
+// ========== CONSENSO SHARP PONDERADO Y MEDIA ARMÓNICA ==========
+
+interface BookmakerMarketDevig {
+  bkKey: string;
+  bkTitle: string;
+  overround: number; // margen bruto sum(1/O_i)
+  probs: Record<string, number>; // Power-devigged P_true por outcome
+}
+
+/**
+ * Calcula la probabilidad real limpia (P_true) para cada outcome combinando:
+ * 1. Consenso Sharp Ponderado: Pinnacle (50%), Betfair/Matchbook (30%), Circa/Bookmaker (20%)
+ * 2. Fallback por Media Armónica de las 4 casas con menor margen (overround) si no hay casa sharp directa.
+ */
+function computeConsensusTrueProbabilities(
+  deviggedBooks: BookmakerMarketDevig[],
+  outcomes: string[]
+): {
+  trueProbs: Record<string, number>;
+  usedSharpConsensus: boolean;
+  sharpProbsByBook: Map<string, Record<string, number>>;
+} {
+  const sharpProbsByBook = new Map<string, Record<string, number>>();
+  const sharpBooksPresent = deviggedBooks.filter(b => SHARP_BOOK_KEYS.has(b.bkKey));
+
+  for (const sb of sharpBooksPresent) {
+    sharpProbsByBook.set(sb.bkKey, sb.probs);
   }
 
-  const outcomeData = new Map<string, { 
-    odds: {price: number, bkKey: string, bkTitle: string}[],
-  }>();
+  const rawProbs: Record<string, number> = {};
 
-  for (const bk of event.bookmakers) {
-    const h2h = bk.markets?.find(m => m.key === 'h2h');
-    if (!h2h?.outcomes) continue;
-    for (const o of h2h.outcomes) {
-       if (!outcomeData.has(o.name)) outcomeData.set(o.name, { odds: [] });
-       outcomeData.get(o.name)!.odds.push({ price: o.price, bkKey: bk.key, bkTitle: bk.title });
+  if (sharpBooksPresent.length > 0) {
+    // 1. Consenso Sharp Ponderado (Pinnacle 50%, Betfair/Matchbook 30%, Circa/Bookmaker 20%)
+    for (const outcome of outcomes) {
+      let weightedSum = 0;
+      let weightTotal = 0;
+      for (const sb of sharpBooksPresent) {
+        const p = sb.probs[outcome];
+        if (p !== undefined && p > 0) {
+          const w = SHARP_TIER_WEIGHTS[sb.bkKey] ?? 0.20;
+          weightedSum += p * w;
+          weightTotal += w;
+        }
+      }
+      rawProbs[outcome] = weightTotal > 0 ? weightedSum / weightTotal : 0;
     }
+
+    // Normalizar para garantizar que sum(P_true) === 1
+    const sum = Object.values(rawProbs).reduce((s, p) => s + p, 0);
+    if (sum > 0) {
+      for (const outcome of outcomes) {
+        rawProbs[outcome] = rawProbs[outcome] / sum;
+      }
+      return { trueProbs: rawProbs, usedSharpConsensus: true, sharpProbsByBook };
+    }
+  }
+
+  // 2. Fallback: Media Armónica de las 4 casas con menor margen (overround)
+  const lowestMarginBooks = [...deviggedBooks]
+    .sort((a, b) => a.overround - b.overround)
+    .slice(0, 4);
+
+  for (const outcome of outcomes) {
+    let reciprocalSum = 0;
+    let count = 0;
+    for (const bk of lowestMarginBooks) {
+      const p = bk.probs[outcome];
+      if (p !== undefined && p > 0.0001) {
+        reciprocalSum += 1 / p;
+        count++;
+      }
+    }
+    rawProbs[outcome] = count > 0 && reciprocalSum > 0 ? count / reciprocalSum : 0;
+  }
+
+  const totalHarmonic = Object.values(rawProbs).reduce((s, p) => s + p, 0);
+  if (totalHarmonic > 0) {
+    for (const outcome of outcomes) {
+      rawProbs[outcome] = rawProbs[outcome] / totalHarmonic;
+    }
+  }
+
+  return { trueProbs: rawProbs, usedSharpConsensus: false, sharpProbsByBook };
+}
+
+// ========== HELPERS DE MERCADOS ==========
+
+interface ParsedMarketPick {
+  fairProb: number;
+  fairOdds: number;
+  bestOdds: number;
+  bookmakerCount: number;
+  consensusStrength: number;
+  pinnacleAligns: boolean;
+  usedSharpConsensus: boolean;
+  oddsArray: number[];
+  validOdds: number[];
+  bestBookmaker: string;
+}
+
+function buildParsedMarketPicks(
+  deviggedBooks: BookmakerMarketDevig[],
+  outcomeOddsMap: Map<string, { price: number; bkKey: string; bkTitle: string }[]>
+): Map<string, ParsedMarketPick> {
+  const outcomes = Array.from(outcomeOddsMap.keys());
+  const { trueProbs, usedSharpConsensus, sharpProbsByBook } = computeConsensusTrueProbabilities(
+    deviggedBooks,
+    outcomes
+  );
+
+  const bkFairProbs = new Map<string, Record<string, number>>();
+  for (const b of deviggedBooks) {
+    bkFairProbs.set(b.bkKey, b.probs);
   }
 
   const result = new Map<string, ParsedMarketPick>();
-  
-  for (const [outcome, data] of outcomeData.entries()) {
-    let totalWeight = 0;
-    let weightedProbSum = 0;
-    for (const odd of data.odds) {
-      const probMap = bkFairProbs.get(odd.bkKey);
-      if (probMap && probMap[outcome] !== undefined) {
-        const w = getBookmakerWeight(odd.bkKey);
-        weightedProbSum += probMap[outcome] * w; // weighted the FAIR probabilities
-        totalWeight += w;
-      }
-    }
-    const fairProb = totalWeight > 0 ? weightedProbSum / totalWeight : 0;
-    
-    const validOddsItems = data.odds.filter(o => o.price >= MIN_ODDS && o.price <= MAX_ODDS);
-    const oddsArray = data.odds.map(o => o.price);
+
+  for (const [outcome, oddsList] of outcomeOddsMap.entries()) {
+    const fairProb = trueProbs[outcome] ?? 0;
+    if (fairProb <= 0) continue;
+
+    const fairOdds = Number((1 / fairProb).toFixed(3));
+    const validOddsItems = oddsList.filter(o => o.price >= MIN_ODDS && o.price <= MAX_ODDS);
+    const oddsArray = oddsList.map(o => o.price);
     const validOdds = validOddsItems.map(o => o.price);
-    
-    // ── REAL Consensus: fracción de libros donde prob fair del outcome > 50% ──
-    // Para cada libro que tiene prob map, verificamos si da probabilidad > 0.5 al outcome
+
+    let bestOdds = 0;
+    let bestBookmaker = 'N/A';
+    if (validOddsItems.length > 0) {
+      let bestItem = validOddsItems[0];
+      for (const item of validOddsItems) {
+        if (item.price > bestItem.price) bestItem = item;
+      }
+      bestOdds = bestItem.price;
+      bestBookmaker = bestItem.bkTitle;
+    } else if (oddsList.length > 0) {
+      bestOdds = Math.max(...oddsArray);
+      const match = oddsList.find(o => o.price === bestOdds);
+      if (match) bestBookmaker = match.bkTitle;
+    }
+
+    const impliedBest = bestOdds > 1 ? 1 / bestOdds : 1;
+
+    // ── Consenso de Mercado: fracción de libros cuya prob justa respalda el valor o favoritismo ──
     let booksAgreeing = 0;
     let booksTotal = 0;
-    for (const odd of data.odds) {
+    for (const odd of oddsList) {
       const probMap = bkFairProbs.get(odd.bkKey);
-      if (probMap && probMap[outcome] !== undefined) {
+      const bookFairProb = probMap?.[outcome];
+      if (bookFairProb !== undefined) {
         booksTotal++;
-        if (probMap[outcome] > 0.5) booksAgreeing++; // majority-probability agreement
+        // Un libro acuerda con el pick si su prob justa supera la prob implícita de la mejor cuota
+        // o está dentro del 1.5% del consenso real o > 50%
+        if (bookFairProb >= impliedBest || bookFairProb >= fairProb * 0.97 || bookFairProb > 0.5) {
+          booksAgreeing++;
+        }
       }
     }
     const consensusStrength = booksTotal > 0 ? booksAgreeing / booksTotal : 0;
 
-    // ── Sharp book alignment: ¿Pinnacle o Betfair respaldan el pick? ──
+    // ── Respaldo Sharp (Pinnacle / Betfair / Matchbook / Bookmaker) ──
     let pinnacleAligns = false;
-    for (const odd of data.odds) {
-      if (SHARP_BOOK_KEYS.has(odd.bkKey)) {
-        const probMap = bkFairProbs.get(odd.bkKey);
-        if (probMap && (probMap[outcome] ?? 0) > 0.5) {
+    for (const [, sharpProbs] of sharpProbsByBook.entries()) {
+      const sp = sharpProbs[outcome];
+      if (sp !== undefined) {
+        // La casa sharp respalda el pick si su probabilidad limpia genera EV positivo en bestOdds
+        // o si considera al outcome favorito (> 50%)
+        if (sp * bestOdds > 1.005 || sp > 0.5) {
           pinnacleAligns = true;
           break;
         }
       }
     }
-    
-    let bestOdds = 0;
-    let bestBookmaker = 'N/A';
-    if (validOddsItems.length > 0) {
-      let bestOddsItem = validOddsItems[0];
-      for (const item of validOddsItems) {
-        if (item.price > bestOddsItem.price) {
-          bestOddsItem = item;
-        }
-      }
-      bestOdds = bestOddsItem.price;
-      bestBookmaker = bestOddsItem.bkTitle;
-    } else if (data.odds.length > 0) {
-       bestOdds = Math.max(...oddsArray);
-       const match = data.odds.find(o => o.price === bestOdds);
-       if (match) bestBookmaker = match.bkTitle;
+
+    // Si no hubo casa sharp en el evento pero el consenso por media armónica de las 4 casas más eficientes
+    // muestra acuerdo >= 75% y al menos 4 casas, permitir alineamiento por consenso eficiente
+    if (!pinnacleAligns && !usedSharpConsensus && validOddsItems.length >= 4 && consensusStrength >= 0.75 && fairProb * bestOdds > 1.03) {
+      pinnacleAligns = true;
     }
-    
+
     result.set(outcome, {
       fairProb,
+      fairOdds,
       bestOdds,
       bookmakerCount: validOddsItems.length,
       consensusStrength,
       pinnacleAligns,
+      usedSharpConsensus,
       oddsArray,
       validOdds,
-      bestBookmaker
+      bestBookmaker,
     });
   }
-  
+
   return result;
+}
+
+function parseH2HMarket(event: OddEvent): Map<string, ParsedMarketPick> {
+  const deviggedBooks: BookmakerMarketDevig[] = [];
+  const outcomeOddsMap = new Map<string, { price: number; bkKey: string; bkTitle: string }[]>();
+
+  for (const bk of event.bookmakers) {
+    const h2h = bk.markets?.find(m => m.key === 'h2h');
+    if (!h2h?.outcomes || h2h.outcomes.length < 2) continue;
+
+    const prices = h2h.outcomes.map(o => o.price);
+    const names = h2h.outcomes.map(o => o.name);
+    const overround = prices.reduce((s, p) => s + (p > 1 ? 1 / p : 0), 0);
+    const fairProbs = powerDevig(prices);
+
+    const probMap: Record<string, number> = {};
+    for (let i = 0; i < names.length; i++) {
+      probMap[names[i]] = fairProbs[i];
+      if (!outcomeOddsMap.has(names[i])) outcomeOddsMap.set(names[i], []);
+      outcomeOddsMap.get(names[i])!.push({ price: prices[i], bkKey: bk.key, bkTitle: bk.title });
+    }
+
+    deviggedBooks.push({
+      bkKey: bk.key,
+      bkTitle: bk.title,
+      overround,
+      probs: probMap,
+    });
+  }
+
+  if (deviggedBooks.length === 0) return new Map();
+  return buildParsedMarketPicks(deviggedBooks, outcomeOddsMap);
 }
 
 function parseTotalsMarket(event: OddEvent): Map<string, ParsedMarketPick> {
-  const bkFairProbs = new Map<string, Record<string, number>>();
-  for (const bk of event.bookmakers) {
-    const totals = bk.markets?.find(m => m.key === 'totals');
-    if (!totals?.outcomes || totals.outcomes.length === 0) continue;
-    
-    const pointsMap = new Map<string, {name: string, price: number}[]>();
-    for (const o of totals.outcomes) {
-       const point = (o as any).point ? String((o as any).point) : 'default';
-       if (!pointsMap.has(point)) pointsMap.set(point, []);
-       pointsMap.get(point)!.push({ name: o.name, price: o.price });
-    }
-    
-    const probMap: Record<string, number> = {};
-    for (const [point, group] of pointsMap.entries()) {
-      if (group.length < 2) continue; // Normally a total outcome requires over/under pair
-      const prices = group.map(x => x.price);
-      const fairProbs = removeVig(prices);
-      for (let i = 0; i < group.length; i++) {
-         probMap[`${group[i].name} ${point === 'default' ? '' : point}`.trim()] = fairProbs[i];
-      }
-    }
-    bkFairProbs.set(bk.key, probMap);
-  }
-
-  const outcomeData = new Map<string, { 
-    odds: {price: number, bkKey: string, bkTitle: string}[],
+  // Agrupar por línea de puntos (ej. "2.5", "8.5") para hacer Power Devigging par-a-par (Over vs Under)
+  const lineGroups = new Map<string, {
+    deviggedBooks: BookmakerMarketDevig[];
+    outcomeOddsMap: Map<string, { price: number; bkKey: string; bkTitle: string }[]>;
   }>();
 
   for (const bk of event.bookmakers) {
     const totals = bk.markets?.find(m => m.key === 'totals');
-    if (!totals?.outcomes) continue;
+    if (!totals?.outcomes || totals.outcomes.length < 2) continue;
+
+    const pointsMap = new Map<string, { name: string; price: number }[]>();
     for (const o of totals.outcomes) {
-       const point = (o as any).point ? String((o as any).point) : 'default';
-       const pickLabel = `${o.name} ${point === 'default' ? '' : point}`.trim();
-       if (!outcomeData.has(pickLabel)) outcomeData.set(pickLabel, { odds: [] });
-       outcomeData.get(pickLabel)!.odds.push({ price: o.price, bkKey: bk.key, bkTitle: bk.title });
+      const point = o.point !== undefined && o.point !== null ? String(o.point) : 'default';
+      if (!pointsMap.has(point)) pointsMap.set(point, []);
+      pointsMap.get(point)!.push({ name: o.name, price: o.price });
+    }
+
+    for (const [point, group] of pointsMap.entries()) {
+      if (group.length < 2) continue;
+      if (!lineGroups.has(point)) {
+        lineGroups.set(point, { deviggedBooks: [], outcomeOddsMap: new Map() });
+      }
+      const lineEntry = lineGroups.get(point)!;
+
+      const prices = group.map(x => x.price);
+      const overround = prices.reduce((s, p) => s + (p > 1 ? 1 / p : 0), 0);
+      const fairProbs = powerDevig(prices);
+      const probMap: Record<string, number> = {};
+
+      for (let i = 0; i < group.length; i++) {
+        const label = `${group[i].name} ${point === 'default' ? '' : point}`.trim();
+        probMap[label] = fairProbs[i];
+        if (!lineEntry.outcomeOddsMap.has(label)) lineEntry.outcomeOddsMap.set(label, []);
+        lineEntry.outcomeOddsMap.get(label)!.push({
+          price: group[i].price,
+          bkKey: bk.key,
+          bkTitle: bk.title,
+        });
+      }
+
+      lineEntry.deviggedBooks.push({
+        bkKey: bk.key,
+        bkTitle: bk.title,
+        overround,
+        probs: probMap,
+      });
     }
   }
 
-  const result = new Map<string, ParsedMarketPick>();
-  
-  for (const [outcome, data] of outcomeData.entries()) {
-    let totalWeight = 0;
-    let weightedProbSum = 0;
-    for (const odd of data.odds) {
-      const probMap = bkFairProbs.get(odd.bkKey);
-      if (probMap && probMap[outcome] !== undefined) {
-        const w = getBookmakerWeight(odd.bkKey);
-        weightedProbSum += probMap[outcome] * w;
-        totalWeight += w;
-      }
+  const combinedResult = new Map<string, ParsedMarketPick>();
+  for (const [, lineEntry] of lineGroups.entries()) {
+    if (lineEntry.deviggedBooks.length === 0) continue;
+    const parsedLine = buildParsedMarketPicks(lineEntry.deviggedBooks, lineEntry.outcomeOddsMap);
+    for (const [k, v] of parsedLine.entries()) {
+      combinedResult.set(k, v);
     }
-    const fairProb = totalWeight > 0 ? weightedProbSum / totalWeight : 0;
-    
-    const validOddsItems = data.odds.filter(o => o.price >= MIN_ODDS && o.price <= MAX_ODDS);
-    const oddsArray = data.odds.map(o => o.price);
-    const validOdds = validOddsItems.map(o => o.price);
-    
-    // ── REAL Consensus for totals ──
-    let booksAgreeing = 0;
-    let booksTotal = 0;
-    for (const odd of data.odds) {
-      const probMap = bkFairProbs.get(odd.bkKey);
-      if (probMap && probMap[outcome] !== undefined) {
-        booksTotal++;
-        if (probMap[outcome] > 0.5) booksAgreeing++;
-      }
-    }
-    const consensusStrength = booksTotal > 0 ? booksAgreeing / booksTotal : 0;
-
-    // ── Sharp book alignment ──
-    let pinnacleAligns = false;
-    for (const odd of data.odds) {
-      if (SHARP_BOOK_KEYS.has(odd.bkKey)) {
-        const probMap = bkFairProbs.get(odd.bkKey);
-        if (probMap && (probMap[outcome] ?? 0) > 0.5) {
-          pinnacleAligns = true;
-          break;
-        }
-      }
-    }
-
-    let bestOdds = 0;
-    let bestBookmaker = 'N/A';
-    if (validOddsItems.length > 0) {
-      let bestOddsItem = validOddsItems[0];
-      for (const item of validOddsItems) {
-        if (item.price > bestOddsItem.price) {
-          bestOddsItem = item;
-        }
-      }
-      bestOdds = bestOddsItem.price;
-      bestBookmaker = bestOddsItem.bkTitle;
-    } else if (data.odds.length > 0) {
-       bestOdds = Math.max(...oddsArray);
-       const match = data.odds.find(o => o.price === bestOdds);
-       if (match) bestBookmaker = match.bkTitle;
-    }
-    
-    result.set(outcome, {
-      fairProb,
-      bestOdds,
-      bookmakerCount: validOddsItems.length,
-      consensusStrength,
-      pinnacleAligns,
-      oddsArray,
-      validOdds,
-      bestBookmaker
-    });
   }
-  
-  return result;
+
+  return combinedResult;
 }
-
 
 // ========== MOTOR PRINCIPAL ==========
 
@@ -445,84 +612,27 @@ export function extractValueBets(
   minValueThreshold: number = 2.0,
   filterMainSports: boolean = true
 ): ValueBetOpportunity[] {
-  const opportunities: ValueBetOpportunity[] = [];
-  
-  for (const event of events) {
-    if (!event.bookmakers || event.bookmakers.length < 2) continue;
-    if (filterMainSports && !isMainSport(event.sport_key)) continue;
+  const all = extractAllValueBets(events, minValueThreshold, filterMainSports);
 
-    const eventLabel = `${event.home_team} vs ${event.away_team}`;
-    const h2hMap = parseH2HMarket(event);
-    const totalsMap = parseTotalsMarket(event);
-
-    const processMap = (marketMap: Map<string, ParsedMarketPick>, isH2H: boolean) => {
-      for (const [pickLabel, data] of marketMap.entries()) {
-        if (data.validOdds.length === 0) continue;
-        const value = calculateValuePercentage(data.fairProb, data.bestOdds);
-        if (value < minValueThreshold) continue;
-
-        let market = 'Unknown';
-        let pick = pickLabel;
-        if (isH2H) {
-           const isDrawPick = pickLabel === 'Draw' || pickLabel === 'Empate';
-           pick = isDrawPick ? 'Empate' : `Gana ${pickLabel}`;
-           market = isDrawPick ? 'Empate' : 'H2H';
-        } else {
-           market = 'Over/Under';
-        }
-
-        opportunities.push({
-          eventId: event.id,
-          event: eventLabel,
-          pick,
-          market,
-          oddsMin: Math.min(...data.validOdds),
-          oddsMax: Math.max(...data.validOdds),
-          oddsBest: data.bestOdds,
-          bestBookmaker: data.bestBookmaker,
-          bookmakerCount: data.bookmakerCount,
-          marketProbability: data.fairProb,
-          valuePercentage: value,
-          kellyStake: calculateKellyCriterion(data.fairProb, data.bestOdds, 0.25),
-          consensusStrength: data.consensusStrength,
-          pinnacleAligns: data.pinnacleAligns,
-          sport: event.sport_key,
-          league: event.sport_title,
-          commenceTime: event.commence_time,
-        });
-      }
-    };
-    
-    processMap(h2hMap, true);
-    processMap(totalsMap, false);
-  }
-
-  // Deduplicar: solo la MEJOR selección por partido
+  // Deduplicar: solo la MEJOR selección aceptable por partido
   const bestPerEvent = new Map<string, ValueBetOpportunity>();
-  for (const op of opportunities) {
+  for (const op of all) {
     const existing = bestPerEvent.get(op.eventId);
     if (!existing || op.valuePercentage > existing.valuePercentage) {
       bestPerEvent.set(op.eventId, op);
     }
   }
 
-  // Filtrar: solo cuotas aceptables según el sistema de zonas
-  const filtered = Array.from(bestPerEvent.values()).filter(op =>
-    isOddsAcceptable(op.oddsBest, op.valuePercentage, op.pinnacleAligns)
-  );
-
-  // Ordenar: Zona A primero, luego Zona B, luego Zona C; dentro de cada zona por value%
-  return filtered.sort((a, b) => {
+  return Array.from(bestPerEvent.values()).sort((a, b) => {
     const zoneA = getOddsZone(a.oddsBest);
     const zoneB = getOddsZone(b.oddsBest);
-    if (zoneA !== zoneB) return zoneA - zoneB; // Zona A (1) antes que B (2) antes que C (3)
+    if (zoneA !== zoneB) return zoneA - zoneB;
     return b.valuePercentage - a.valuePercentage;
   });
 }
 
 /**
- * Versión expandida: muestra TODAS las oportunidades por partido (para la página de Value Bets).
- * Aún consolidada por pick (no repetida por bookmaker), pero permite varios picks por partido.
+ * Versión expandida: muestra TODAS las oportunidades por partido (para Value Bets Scanner).
  */
 export function extractAllValueBets(
   events: OddEvent[],
@@ -530,7 +640,7 @@ export function extractAllValueBets(
   filterMainSports: boolean = true
 ): ValueBetOpportunity[] {
   const opportunities: ValueBetOpportunity[] = [];
-  
+
   for (const event of events) {
     if (!event.bookmakers || event.bookmakers.length < 2) continue;
     if (filterMainSports && !isMainSport(event.sport_key)) continue;
@@ -548,11 +658,11 @@ export function extractAllValueBets(
         let market = 'Unknown';
         let pick = pickLabel;
         if (isH2H) {
-           const isDrawPick = pickLabel === 'Draw' || pickLabel === 'Empate';
-           pick = isDrawPick ? 'Empate' : `Gana ${pickLabel}`;
-           market = isDrawPick ? 'Empate' : 'H2H';
+          const isDrawPick = pickLabel === 'Draw' || pickLabel === 'Empate';
+          pick = isDrawPick ? 'Empate' : `Gana ${pickLabel}`;
+          market = isDrawPick ? 'Empate' : 'H2H';
         } else {
-           market = 'Over/Under';
+          market = 'Over/Under';
         }
 
         opportunities.push({
@@ -563,6 +673,7 @@ export function extractAllValueBets(
           oddsMin: Math.min(...data.validOdds),
           oddsMax: Math.max(...data.validOdds),
           oddsBest: data.bestOdds,
+          fairOdds: data.fairOdds,
           bestBookmaker: data.bestBookmaker,
           bookmakerCount: data.bookmakerCount,
           marketProbability: data.fairProb,
@@ -570,18 +681,18 @@ export function extractAllValueBets(
           kellyStake: calculateKellyCriterion(data.fairProb, data.bestOdds, 0.25),
           consensusStrength: data.consensusStrength,
           pinnacleAligns: data.pinnacleAligns,
+          usedSharpConsensus: data.usedSharpConsensus,
           sport: event.sport_key,
           league: event.sport_title,
           commenceTime: event.commence_time,
         });
       }
     };
-    
+
     processMap(h2hMap, true);
     processMap(totalsMap, false);
   }
 
-  // Filtrar por zonas aceptables y ordenar
   return opportunities
     .filter(op => isOddsAcceptable(op.oddsBest, op.valuePercentage, op.pinnacleAligns))
     .sort((a, b) => {
@@ -595,8 +706,12 @@ export function extractAllValueBets(
 // ========== ANÁLISIS DE MEJOR PICK POR PARTIDO ==========
 
 /**
- * Analiza todos los mercados de un partido y devuelve EL MEJOR pick.
- * Esto es lo que el usuario ve en el Dashboard — la recomendación del analista.
+ * Analiza todos los mercados de un partido y devuelve EL MEJOR pick que cumpla
+ * con las reglas de zona e integridad cuantitativa.
+ *
+ * IMPORTANTE: Evalúa `isOddsAcceptable` ANTES de elegir el mejor pick del partido,
+ * evitando que un longshot de Zona C (que luego sería rechazado) sobrescriba un
+ * Value Bet válido de Zona A o Zona B.
  */
 export function getSmartPicks(
   events: OddEvent[],
@@ -609,10 +724,8 @@ export function getSmartPicks(
     if (filterMainSports && !isMainSport(event.sport_key)) continue;
 
     const eventLabel = `${event.home_team} vs ${event.away_team}`;
-    let bestValue = 0;
-    let bestPick: SmartPick | null = null;
-    let fallbackPick: SmartPick | null = null;
-    let lowestLoss = -Infinity;
+    let bestAcceptablePick: SmartPick | null = null;
+    let bestAcceptableScore = -Infinity;
 
     const h2hMap = parseH2HMarket(event);
     const totalsMap = parseTotalsMarket(event);
@@ -621,29 +734,31 @@ export function getSmartPicks(
       for (const [pickLabel, data] of marketMap.entries()) {
         if (data.validOdds.length === 0) continue;
         const value = calculateValuePercentage(data.fairProb, data.bestOdds);
-        
+
         let market = 'Unknown';
         let pick = pickLabel;
         if (isH2H) {
-           const isDrawPick = pickLabel === 'Draw' || pickLabel === 'Empate';
-           pick = isDrawPick ? 'Empate' : `Gana ${pickLabel}`;
-           market = isDrawPick ? 'Empate' : 'H2H';
+          const isDrawPick = pickLabel === 'Draw' || pickLabel === 'Empate';
+          pick = isDrawPick ? 'Empate' : `Gana ${pickLabel}`;
+          market = isDrawPick ? 'Empate' : 'H2H';
         } else {
-           market = 'Over/Under';
+          market = 'Over/Under';
         }
 
-        // ── Multi-factor confidence: value% + bookmakers count + sharp book alignment ──
-        // Alta: value >= 5% Y (pinnacle align O 5+ books Y consensus > 0.7)
-        // Media: value >= 2% O (baja value pero pinnacle align con 3+ books)
-        // Baja: todo lo demás
+        // Clasificación multifactorial de confianza
         let confidence: 'alta' | 'media' | 'baja';
-        if (value >= 5 && (data.pinnacleAligns || (data.bookmakerCount >= 5 && data.consensusStrength >= 0.7))) {
+        if (
+          value >= 4.0 &&
+          (data.pinnacleAligns || (data.bookmakerCount >= 4 && data.consensusStrength >= 0.65))
+        ) {
           confidence = 'alta';
-        } else if (value >= 2 || (data.pinnacleAligns && data.bookmakerCount >= 3)) {
+        } else if (value >= 1.5 || (data.pinnacleAligns && data.bookmakerCount >= 3 && value > 0)) {
           confidence = 'media';
         } else {
           confidence = 'baja';
         }
+
+        const acceptable = isOddsAcceptable(data.bestOdds, value, data.pinnacleAligns);
 
         const candidatePick: SmartPick = {
           eventId: event.id,
@@ -657,6 +772,8 @@ export function getSmartPicks(
             ? `${Math.min(...data.validOdds).toFixed(2)}–${Math.max(...data.validOdds).toFixed(2)}`
             : data.bestOdds.toFixed(2),
           bestOdds: data.bestOdds,
+          fairOdds: data.fairOdds,
+          bestBookmaker: data.bestBookmaker,
           valuePercentage: Math.max(0, value),
           kellyStake: calculateKellyCriterion(data.fairProb, data.bestOdds, 0.25),
           marketProbability: data.fairProb,
@@ -664,25 +781,20 @@ export function getSmartPicks(
           bookmakerCount: data.bookmakerCount,
           consensusStrength: data.consensusStrength,
           pinnacleAligns: data.pinnacleAligns,
-          isFallback: false, // Will be set to true below if no value edge
-          isRecommended: false, // Will be set later
+          usedSharpConsensus: data.usedSharpConsensus,
+          isFallback: value <= 0,
+          isRecommended: acceptable,
         };
 
-        if (value > 0) {
-          if (value > bestValue || !bestPick || bestPick.valuePercentage <= 0) {
-            bestValue = value;
-            bestPick = candidatePick;
-          }
-        } else {
-          // If value <= 0, we track it for fallback just in case there is no pick with value
-          const lossExpected = value; // since value is < 0, it represents the expected loss (-5% for example)
-          if (lossExpected > lowestLoss) {
-            lowestLoss = lossExpected;
-            candidatePick.valuePercentage = 0;
-            candidatePick.kellyStake = 0;
-            candidatePick.confidence = 'baja';
-            candidatePick.isFallback = true;
-            fallbackPick = Object.assign({}, candidatePick); // important to copy
+        if (acceptable && value > 0) {
+          // Priorizar Zona A/B y mayor EV ponderado
+          const zoneBonus = isOddsZoneA(data.bestOdds) ? 3 : isOddsZoneB(data.bestOdds) ? 1.5 : 0;
+          const sharpBonus = data.pinnacleAligns ? 2 : 0;
+          const candidateScore = value + zoneBonus + sharpBonus;
+
+          if (candidateScore > bestAcceptableScore) {
+            bestAcceptableScore = candidateScore;
+            bestAcceptablePick = candidatePick;
           }
         }
       }
@@ -691,122 +803,202 @@ export function getSmartPicks(
     processMap(h2hMap, true);
     processMap(totalsMap, false);
 
-    const bp = bestPick as SmartPick | null;
-    const fp = fallbackPick as SmartPick | null;
-
-    if (bp && bp.valuePercentage > 0) {
-      picks.push(bp);
-    } else if (!bp && fp) {
-      // Solo como fallback si no hay absolutamente ningún pick con valor positivo
-      picks.push(fp);
-    } else if (bp) {
-      // in case we pushed a negative value initially, though we shouldn't because of if(value > 0)
-      bp.valuePercentage = 0;
-      bp.kellyStake = 0;
-      bp.confidence = 'baja';
-      bp.isFallback = true;
-      picks.push(bp);
+    if (bestAcceptablePick) {
+      picks.push(bestAcceptablePick);
     }
   }
-  // Filtrar picks recomendados (los que pasan el estricto filtro de zonas/value)
-  const acceptablePicks = picks.filter(p => {
-    p.isRecommended = isOddsAcceptable(p.bestOdds, p.valuePercentage, p.pinnacleAligns);
-    return p.isRecommended;
-  });
 
-  return acceptablePicks.sort((a, b) => {
-    // 1. Picks con value real antes que fallbacks
-    if (a.valuePercentage > 0 && b.valuePercentage <= 0) return -1;
-    if (b.valuePercentage > 0 && a.valuePercentage <= 0) return 1;
-    // 2. Zona A antes que B antes que C
+  return picks.sort((a, b) => {
     const zoneA = getOddsZone(a.bestOdds);
     const zoneB = getOddsZone(b.bestOdds);
     if (zoneA !== zoneB) return zoneA - zoneB;
-    // 3. Dentro de la misma zona, por value%
     return b.valuePercentage - a.valuePercentage;
   });
 }
 
-// ========== INTEGRACIÓN DE APIs (FASE 3) ==========
-
-import { getTeamForm } from '@/lib/apis/sofascore';
-// import { searchNBATeam, getNBATeamRecord } from '@/lib/apis/balldontlie';
-
 /**
- * Enriquece asíncronamente los picks recomendados con estadísticas de SofaScore (y BallDontLie en el futuro).
- * Si la API reporta una racha ganadora fuerte (>70%), eleva la confianza a 'alta'.
+ * Diagnóstico forense de descarte por evento para el embudo de telemetría (`funnel_diagnostics`).
  */
-export async function enrichPicksWithStats(picks: SmartPick[]): Promise<SmartPick[]> {
-  // Solo procesar un máximo de picks para no quemar cuotas de la API muy rápido
-  const picksToEnrich = picks.slice(0, 15);
-  
-  const enrichedPicks = await Promise.all(picksToEnrich.map(async (pick) => {
-    // Si ya es 'alta', o si no tiene valor positivo, no gastamos peticiones a la API
-    if (pick.confidence === 'alta' || pick.valuePercentage <= 0) {
-      return pick;
+export function diagnoseEventsFunnel(
+  events: OddEvent[],
+  minAlertValue: number = 3.5
+): {
+  valueBetsCalculated: SmartPick[];
+  passedThresholdFilters: SmartPick[];
+  discardReasons: {
+    insufficient_bookmakers: number;
+    non_main_sport: number;
+    missing_sharp_book: number;
+    ev_too_low: number;
+    odds_out_of_zone: number;
+  };
+} {
+  const discardReasons = {
+    insufficient_bookmakers: 0,
+    non_main_sport: 0,
+    missing_sharp_book: 0,
+    ev_too_low: 0,
+    odds_out_of_zone: 0,
+  };
+
+  for (const event of events) {
+    if (!event.bookmakers || event.bookmakers.length < 2) {
+      discardReasons.insufficient_bookmakers++;
+      continue;
+    }
+    if (!isMainSport(event.sport_key)) {
+      discardReasons.non_main_sport++;
+      continue;
     }
 
-    // Identificar de qué equipo apostamos a que gana (Gana X)
-    const matchGana = pick.bestPick.match(/Gana (.+)/);
-    if (matchGana && matchGana[1]) {
-      const teamName = matchGana[1];
-      
-      // Llamada asíncrona a SofaScore (caché gestionado en la API)
-      const form = await getTeamForm(teamName);
-      
-      if (form && form.winPercentage >= 70) {
-        // Boost de confianza por buena racha!
-        return {
-          ...pick,
-          confidence: 'alta' as const,
-          // Agregamos un pequeño tooltip mental: el equipo viene muy bien
-          bestPick: `${pick.bestPick} 🔥`
-        };
-      }
-    }
-    
-    // Si no hubo boost, retornamos el pick original
-    return pick;
-  }));
+    const h2hMap = parseH2HMarket(event);
+    const totalsMap = parseTotalsMarket(event);
+    const allOutcomes = [...h2hMap.values(), ...totalsMap.values()];
 
-  // Los picks que no procesamos (si había más de 15) los dejamos igual
-  const rest = picks.slice(15);
-  return [...enrichedPicks, ...rest];
+    if (allOutcomes.length === 0) {
+      discardReasons.insufficient_bookmakers++;
+      continue;
+    }
+
+    const hasSharp = allOutcomes.some(o => o.usedSharpConsensus);
+    if (!hasSharp) {
+      discardReasons.missing_sharp_book++;
+    }
+
+    const hasPositiveEv = allOutcomes.some(o => calculateValuePercentage(o.fairProb, o.bestOdds) > 0);
+    if (!hasPositiveEv) {
+      discardReasons.ev_too_low++;
+      continue;
+    }
+
+    const hasAcceptableZone = allOutcomes.some(o => {
+      const ev = calculateValuePercentage(o.fairProb, o.bestOdds);
+      return isOddsAcceptable(o.bestOdds, ev, o.pinnacleAligns);
+    });
+
+    if (!hasAcceptableZone) {
+      discardReasons.odds_out_of_zone++;
+    }
+  }
+
+  const valueBetsCalculated = getSmartPicks(events, true);
+  const passedThresholdFilters = valueBetsCalculated.filter(
+    p => p.confidence === 'alta' || p.valuePercentage >= minAlertValue
+  );
+
+  // Contabilizar picks con EV positivo pero debajo del umbral de alerta
+  const rejectedByThreshold = valueBetsCalculated.length - passedThresholdFilters.length;
+  discardReasons.ev_too_low += Math.max(0, rejectedByThreshold);
+
+  return {
+    valueBetsCalculated,
+    passedThresholdFilters,
+    discardReasons,
+  };
 }
 
+// ========== INTEGRACIÓN DE PROVEEDORES SECUNDARIOS CON DEGRADACIÓN ELEGANTE ==========
+
+/**
+ * Envuelve cualquier promesa con un timeout estricto (default 3000ms).
+ * Si falla o expira, devuelve null sin propagar excepción.
+ */
+async function withGracefulTimeout<T>(promise: Promise<T>, ms: number = 3000): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const timeoutPromise = new Promise<null>(resolve => {
+      timer = setTimeout(() => resolve(null), ms);
+    });
+    return await Promise.race([promise, timeoutPromise]);
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Enriquece asíncronamente los picks recomendados con estadísticas de SofaScore y BallDontLie.
+ * Aislado con Degradación Elegante (Graceful Degradation) y timeout < 3s:
+ * si SofaScore devuelve 403 Cloudflare o BallDontLie falla, el motor continúa
+ * basándose puramente en el consenso matemático de mercado sin abortar el flujo.
+ */
+export async function enrichPicksWithStats(picks: SmartPick[]): Promise<SmartPick[]> {
+  if (!picks || picks.length === 0) return [];
+
+  const picksToEnrich = picks.slice(0, 10);
+
+  const settled = await Promise.allSettled(
+    picksToEnrich.map(async (pick) => {
+      if (pick.confidence === 'alta' || pick.valuePercentage <= 0) {
+        return pick;
+      }
+
+      try {
+        const matchGana = pick.bestPick.match(/Gana (.+)/);
+        if (!matchGana || !matchGana[1]) return pick;
+        const teamName = matchGana[1].trim();
+
+        // Si es NBA, intentar BallDontLie con timeout de 2.8s
+        if (pick.sport.includes('basketball_nba')) {
+          const nbaTeam = await withGracefulTimeout(searchNBATeam(teamName), 2800);
+          if (nbaTeam) {
+            const record = await withGracefulTimeout(getNBATeamRecord(nbaTeam.id), 2800);
+            if (record && record.winPercentage >= 65) {
+              return {
+                ...pick,
+                confidence: 'alta' as const,
+                bestPick: `${pick.bestPick} 🔥`,
+              };
+            }
+          }
+        }
+
+        // SofaScore form con timeout estricto de 2.8s
+        const form = await withGracefulTimeout(getTeamForm(teamName), 2800);
+        if (form && form.winPercentage >= 70) {
+          return {
+            ...pick,
+            confidence: 'alta' as const,
+            bestPick: `${pick.bestPick} 🔥`,
+          };
+        }
+      } catch (err) {
+        // Degradación elegante: nunca abortar la evaluación del partido
+        console.warn(`[enrichPicksWithStats] Degradación elegante en ${pick.event}:`, err);
+      }
+
+      return pick;
+    })
+  );
+
+  const enrichedPicks = settled.map((res, idx) =>
+    res.status === 'fulfilled' ? res.value : picksToEnrich[idx]
+  );
+
+  return [...enrichedPicks, ...picks.slice(10)];
+}
 
 // ========== PICKS DIARIOS CON FILTRO DE CALIDAD ==========
 
 export interface DailyPicksConfig {
-  minPicks?: number;  // Mínimo de picks a mostrar (default: 1)
-  maxPicks?: number;  // Máximo de picks a mostrar (default: 10)
-  requireHighConfidence?: boolean; // Si true, solo 'alta'. Default: false (alta + media)
-  todayOnly?: boolean; // Si true, solo partidos de hoy (zona horaria México). Default: true
+  minPicks?: number;
+  maxPicks?: number;
+  requireHighConfidence?: boolean;
+  todayOnly?: boolean;
 }
 
-/**
- * Calcula un score ponderado para rankear picks diarios.
- * Combina: value%, consenso, respaldo de sharp books y zona de cuotas.
- */
 function calculatePickScore(pick: SmartPick): number {
-  const valueScore      = Math.min(pick.valuePercentage, 20) * 2;     // 0–40 pts
-  const consensusScore  = pick.consensusStrength * 20;                 // 0–20 pts
-  const pinnacleBonus   = pick.pinnacleAligns ? 15 : 0;               // 0–15 pts
+  const valueScore      = Math.min(pick.valuePercentage, 20) * 2;
+  const consensusScore  = pick.consensusStrength * 20;
+  const pinnacleBonus   = pick.pinnacleAligns ? 15 : 0;
+  const steamBonus      = pick.isSteamMove ? 12 : 0;
   const confidenceBonus = pick.confidence === 'alta' ? 20
-                        : pick.confidence === 'media' ? 10 : 0;       // 0–20 pts
-  const zoneBonus       = isOddsZoneA(pick.bestOdds) ? 5 : 0;        // +5 si está en zona primaria
-  return valueScore + consensusScore + pinnacleBonus + confidenceBonus + zoneBonus;
+                        : pick.confidence === 'media' ? 10 : 0;
+  const zoneBonus       = isOddsZoneA(pick.bestOdds) ? 5 : 0;
+  return valueScore + consensusScore + pinnacleBonus + steamBonus + confidenceBonus + zoneBonus;
 }
 
-/**
- * Filtra y limita los smart picks a un rango de 5–10 picks de alta calidad.
- * 
- * Lógica:
- * 1. Descarta picks sin value real (isFallback) si hay suficientes con value positivo
- * 2. Ordena por score ponderado (value + consenso + sharp books + zona)
- * 3. Aplica límite de maxPicks
- * 4. Si no hay suficientes de confianza alta/media, incluye 'baja' hasta alcanzar minPicks
- */
 export function getTopDailyPicks(
   events: OddEvent[],
   config: DailyPicksConfig = {}
@@ -818,15 +1010,12 @@ export function getTopDailyPicks(
     todayOnly = true,
   } = config;
 
-  // Filtrar eventos por fecha si todayOnly está activo
   const filteredEvents = todayOnly
     ? events.filter(e => isTodayInMexico(e.commence_time))
     : events;
 
-  // Obtener todos los smart picks con el filtro de zonas ya aplicado
   const allPicks = getSmartPicks(filteredEvents, true);
 
-  // Separar por calidad (Solo de los recomendados)
   const highQuality = allPicks.filter(p =>
     p.isRecommended && p.valuePercentage > 0 &&
     (requireHighConfidence
@@ -838,16 +1027,12 @@ export function getTopDailyPicks(
     p.isRecommended && !highQuality.includes(p) && p.valuePercentage > 0
   );
 
-  // Ordenar cada grupo por score ponderado
   const sortedHigh = highQuality.sort((a, b) => calculatePickScore(b) - calculatePickScore(a));
   const sortedLow  = lowQuality.sort((a, b) => calculatePickScore(b) - calculatePickScore(a));
 
-  // Tomar hasta maxPicks de alta calidad
   let result = sortedHigh.slice(0, maxPicks);
 
-  // Si todayOnly está activo, no forzar el mínimo (enviar lo que haya de hoy)
-  // Si todayOnly está desactivado (web), completar con baja calidad hasta minPicks
-  if (!todayOnly && result.length < minPicks) {
+  if (result.length < minPicks) {
     const needed = minPicks - result.length;
     result = [...result, ...sortedLow.slice(0, needed)];
   }
@@ -855,19 +1040,86 @@ export function getTopDailyPicks(
   return result;
 }
 
-// ========== STATS ==========
+// ========== ESTADÍSTICAS CUANTITATIVAS, CLV Y SIGNIFICANCIA ESTADÍSTICA (P-VALUE) ==========
+
+/**
+ * Aproximación numérica de la función de distribución acumulada normal estándar (1 - Phi(z))
+ * para calcular el P-Value unilateral de ventaja estadística real sobre el azar (H0: ROI <= 0).
+ */
+function normalSurvivalFunction(z: number): number {
+  if (z <= 0) return 0.5;
+  if (z > 8) return 0.00001;
+  const t = 1 / (1 + 0.2316419 * z);
+  const d = 0.3989422804014327 * Math.exp((-z * z) / 2);
+  const prob =
+    d *
+    t *
+    (0.31938153 +
+      t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + 1.330274429 * t))));
+  return Math.max(0, Math.min(1, prob));
+}
 
 export function calculateBettingStats(bets: Array<{
-  status: string; stake: number; odds: number; profit: number;
+  status: string;
+  stake: number;
+  odds: number;
+  profit: number;
+  clv_pct?: number | null;
+  closing_odds?: number | null;
 }>) {
   const total = bets.length;
-  const closed = bets.filter(b => b.status === 'won' || b.status === 'lost');
-  const won = bets.filter(b => b.status === 'won');
-  const lost = bets.filter(b => b.status === 'lost');
+  const closed = bets.filter(b => b.status === 'won' || b.status === 'lost' || b.status === 'half_won' || b.status === 'half_lost');
+  const won = bets.filter(b => b.status === 'won' || b.status === 'half_won');
+  const lost = bets.filter(b => b.status === 'lost' || b.status === 'half_lost');
+  const push = bets.filter(b => b.status === 'push' || b.status === 'void');
   const pending = bets.filter(b => b.status === 'pending');
-  const totalStaked = closed.reduce((sum, b) => sum + b.stake, 0);
-  const totalProfit = bets.reduce((sum, b) => sum + (b.profit || 0), 0);
+
+  const totalStaked = closed.reduce((sum, b) => sum + (b.stake || 0), 0);
+  const totalProfit = closed.reduce((sum, b) => sum + (b.profit || 0), 0);
   const roi = totalStaked > 0 ? (totalProfit / totalStaked) * 100 : 0;
   const winRate = closed.length > 0 ? (won.length / closed.length) * 100 : 0;
-  return { total, won: won.length, lost: lost.length, pending: pending.length, totalStaked, totalProfit, roi, winRate };
+
+  // Cálculo de CLV promedio y EV esperado
+  let clvSum = 0;
+  let clvCount = 0;
+  for (const b of bets) {
+    if (typeof b.clv_pct === 'number' && !isNaN(b.clv_pct)) {
+      clvSum += b.clv_pct;
+      clvCount++;
+    } else if (b.closing_odds && b.closing_odds > 1 && b.odds > 1) {
+      const clv = ((b.odds / b.closing_odds) - 1) * 100;
+      clvSum += clv;
+      clvCount++;
+    }
+  }
+  const avgClv = clvCount > 0 ? clvSum / clvCount : 0;
+
+  // Significancia estadística (Test Z sobre rendimiento de apuestas cerradas)
+  // Varianza por unidad apostada bajo H0 (sin ventaja): sigma^2 ≈ O - 1
+  let zScore = 0;
+  let pValue = 0.5;
+  if (closed.length >= 3 && totalStaked > 0) {
+    const avgOdds = closed.reduce((s, b) => s + (b.odds > 1 ? b.odds : 2), 0) / closed.length;
+    const yieldDecimal = roi / 100;
+    const stdDevPerBet = Math.sqrt(Math.max(0.25, avgOdds - 1));
+    zScore = (yieldDecimal * Math.sqrt(closed.length)) / stdDevPerBet;
+    pValue = normalSurvivalFunction(zScore);
+  }
+
+  return {
+    total,
+    won: won.length,
+    lost: lost.length,
+    push: push.length,
+    pending: pending.length,
+    totalStaked,
+    totalProfit,
+    roi,
+    winRate,
+    avgClv,
+    clvCount,
+    zScore,
+    pValue,
+    isStatisticallySignificant: pValue < 0.05 && closed.length >= 10,
+  };
 }

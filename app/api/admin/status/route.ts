@@ -1,41 +1,57 @@
 import { NextResponse } from 'next/server';
 import { sendTestTelegram, verifyBotToken } from '@/lib/notifications/telegram';
 import { getAllKeyStatuses, initializeKeys } from '@/lib/apis/key-manager';
+import { getLatestEventsFromSnapshot } from '@/app/actions/snapshots';
 
 /**
- * Ruta de diagnóstico — verifica el estado de todo el sistema v3.0
+ * Ruta de diagnóstico institucional — verifica el estado de todo el sistema v4.0
  * GET /api/admin/status
- *
- * ⚠️ Solo para uso en desarrollo/admin. Proteger en producción.
  */
 export async function GET() {
   const results: Record<string, unknown> = {
     timestamp: new Date().toISOString(),
-    version:   'BetIQ v3.0',
+    version:   'BetIQ v4.0 (Quantitative Institutional Engine)',
   };
 
-  // 1. Estado del pool de API keys
+  // 1. Estado del pool de API keys (api_keys_status / api_key_usage)
   try {
-    await initializeKeys(); // Asegura que todas las keys estén registradas
+    await initializeKeys();
     const keyStatuses = await getAllKeyStatuses();
     results.apiKeys = {
       total:      keyStatuses.length,
       available:  keyStatuses.filter(k => !k.isExhausted && k.requestsUsed < 490).length,
       exhausted:  keyStatuses.filter(k => k.isExhausted).length,
       detail:     keyStatuses.map(k => ({
-        key:          k.keyHash,
-        used:         k.requestsUsed,
-        left:         k.requestsLeft,
-        exhausted:    k.isExhausted,
-        lastUsed:     k.lastUsedAt,
-        resetsAt:     k.resetAt,
+        key:                k.keyHash,
+        used:               k.requestsUsed,
+        left:               k.requestsLeft,
+        requests_remaining: k.requestsRemaining,
+        exhausted:          k.isExhausted,
+        exhausted_until:    k.exhaustedUntil,
+        error_count:        k.errorCount,
+        lastUsed:           k.lastUsedAt,
+        last_used_at:       k.lastUsedAt,
+        resetsAt:           k.resetAt,
       })),
     };
   } catch (err: any) {
     results.apiKeys = { error: err.message };
   }
 
-  // 2. Verificación del bot de Telegram (llama a /getMe — no gasta mensajes)
+  // 2. Estado de Snapshots en Supabase
+  try {
+    const snap = await getLatestEventsFromSnapshot(7);
+    results.snapshots = {
+      fresh:             snap.fresh,
+      snapshotAgeMins:   snap.snapshotAge,
+      totalEvents:       snap.events.length,
+      futureEventsCount: snap.futureEventsCount,
+    };
+  } catch (err: any) {
+    results.snapshots = { error: err.message };
+  }
+
+  // 3. Verificación del bot de Telegram
   const hasToken  = !!process.env.TELEGRAM_BOT_TOKEN;
   const hasChatId = !!process.env.TELEGRAM_CHAT_ID;
 
@@ -60,7 +76,7 @@ export async function GET() {
     };
   }
 
-  // 3. Variables de entorno críticas
+  // 4. Variables de entorno críticas
   results.env = {
     THE_ODDS_API_KEYS:         !!process.env.THE_ODDS_API_KEYS,
     SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
@@ -71,11 +87,6 @@ export async function GET() {
   return NextResponse.json(results, { status: 200 });
 }
 
-
-/**
- * POST /api/admin/status
- * Envía un mensaje de prueba a Telegram para verificar la conexión.
- */
 export async function POST() {
   const result = await sendTestTelegram();
   return NextResponse.json(result);

@@ -1,5 +1,4 @@
 import { createClient } from '@/lib/supabase/server';
-import { redirect } from 'next/navigation';
 import { Zap, DollarSign, Target, TrendingUp, Activity, Clock } from 'lucide-react';
 import { getUpcomingMatches, categorizeEventsByTime } from '@/lib/apis/odds-api';
 import { extractValueBets, getSmartPicks, calculateBettingStats, enrichPicksWithStats } from '@/lib/algorithms/value-bet-calculator';
@@ -7,7 +6,7 @@ import LocalTime from '@/components/LocalTime';
 import BankrollWidget from '@/components/bankroll/BankrollWidget';
 import PickCard from '@/components/value-bets/PickCard';
 import PickCardSkeleton from '@/components/ui/PickCardSkeleton';
-import { saveOddsSnapshot } from '@/app/actions/snapshots';
+import { saveOddsSnapshot, detectSteamMoves, computeClvForBets } from '@/app/actions/snapshots';
 import { Suspense } from 'react';
 
 export default async function DashboardPage() {
@@ -18,11 +17,27 @@ export default async function DashboardPage() {
   // ── Data from Supabase ─────
   const [profileResult, betsResult] = user ? await Promise.all([
     supabase.from('profiles').select('bankroll_actual, bankroll_inicial').eq('id', user.id).single(),
-    supabase.from('bets').select('status, stake, odds, profit, created_at').eq('user_id', user.id),
+    supabase.from('bets').select('id, event, pick, market, status, stake, odds, profit, created_at, match_time').eq('user_id', user.id),
   ]) : [{ data: null }, { data: [] }];
 
   const profile = profileResult.data;
-  const allBets = (betsResult.data as any[]) ?? [];
+  const rawBets = (betsResult.data as any[]) ?? [];
+
+  const clvRecord = await computeClvForBets(
+    rawBets.map(b => ({
+      id: b.id,
+      event: b.event ?? '',
+      pick: b.pick ?? '',
+      market: b.market ?? 'H2H',
+      odds: parseFloat(b.odds ?? '0'),
+      match_time: b.match_time ?? b.created_at,
+    }))
+  );
+
+  const allBets = rawBets.map(b => ({
+    ...b,
+    clvPct: clvRecord[b.id]?.clvPct ?? null,
+  }));
 
   const oneWeekAgo = new Date();
   oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
@@ -31,10 +46,12 @@ export default async function DashboardPage() {
   const totalStats = calculateBettingStats(allBets.map(b => ({
     status: b.status, stake: parseFloat(b.stake ?? '0'),
     odds: parseFloat(b.odds ?? '0'), profit: parseFloat(b.profit ?? '0'),
+    clvPct: b.clvPct,
   })));
   const weekStats = calculateBettingStats(weekBets.map(b => ({
     status: b.status, stake: parseFloat(b.stake ?? '0'),
     odds: parseFloat(b.odds ?? '0'), profit: parseFloat(b.profit ?? '0'),
+    clvPct: b.clvPct,
   })));
 
   const bankrollActual = parseFloat((profile as any)?.bankroll_actual ?? '1000');
@@ -54,10 +71,26 @@ export default async function DashboardPage() {
   // Calculate best picks for ALL valid matches
   let baseSmartPicks = getSmartPicks(allValidMatches, true);
   
-  // Enrich picks with SofaScore / APIs
-  let smartPicks = await enrichPicksWithStats(baseSmartPicks);
+  // Enrich picks with SofaScore / APIs and Steam Moves
+  const [enrichedPicks, { steamMap }] = await Promise.all([
+    enrichPicksWithStats(baseSmartPicks),
+    detectSteamMoves(allValidMatches),
+  ]);
 
-  // Sort them by time so they make chronological chronological sense
+  let smartPicks = enrichedPicks.map(p => {
+    const cleanPick = p.bestPick.replace(/🔥/g, '').trim();
+    const steam = steamMap.get(`${p.eventId}::${cleanPick}`) ?? steamMap.get(`${p.eventId}::${p.bestPick}`);
+    if (steam) {
+      return {
+        ...p,
+        isSteamMove: true,
+        steamMoveDelta: steam.impliedProbDeltaPct,
+      };
+    }
+    return p;
+  });
+
+  // Sort them by time so they make chronological sense
   smartPicks.sort((a, b) => new Date(a.commenceTime).getTime() - new Date(b.commenceTime).getTime());
 
   const nowMs = Date.now();
@@ -98,9 +131,9 @@ export default async function DashboardPage() {
       positive: true,
     },
     {
-      label: 'ROI Total', icon: TrendingUp, color: 'var(--accent-blue)',
+      label: 'ROI / CLV', icon: TrendingUp, color: 'var(--accent-blue)',
       value: `${totalStats.roi >= 0 ? '+' : ''}${totalStats.roi.toFixed(1)}%`,
-      change: totalStats.total > 0 ? `${totalStats.total} apuestas` : 'Sin apuestas aún',
+      change: `CLV: ${totalStats.avgClv >= 0 ? '+' : ''}${totalStats.avgClv.toFixed(2)}% · p=${totalStats.pValue.toFixed(2)}`,
       positive: totalStats.roi >= 0,
     },
     {

@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server';
-import { TrendingUp, BarChart2, Trophy, Target, DollarSign, Activity, Compass } from 'lucide-react';
+import { TrendingUp, BarChart2, Trophy, Target, DollarSign, Activity, Compass, Zap, Waves } from 'lucide-react';
 import { calculateBettingStats } from '@/lib/algorithms/value-bet-calculator';
+import { computeClvForBets, detectSteamMoves } from '@/app/actions/snapshots';
 import LineChart from '@/components/ui/LineChart';
 
 export default async function TrendsPage() {
@@ -14,13 +15,39 @@ export default async function TrendsPage() {
     .eq('user_id', user.id)
     .order('created_at', { ascending: true }) : { data: [] };
 
-  const allBets = bets ?? [];
-  const closedBets = allBets.filter(b => b.status === 'won' || b.status === 'lost');
+  const rawBets = (bets as any[]) ?? [];
+
+  const [clvRecord, { steamList }] = await Promise.all([
+    computeClvForBets(
+      rawBets.map(b => ({
+        id: b.id,
+        event: b.event ?? '',
+        pick: b.pick ?? '',
+        market: b.market ?? 'H2H',
+        odds: parseFloat(b.odds ?? '0'),
+        match_time: b.match_time ?? b.created_at,
+      }))
+    ),
+    detectSteamMoves(),
+  ]);
+
+  const activeSteamMoves = steamList.slice(0, 8);
+
+  const allBets = rawBets.map(b => ({
+    ...b,
+    clvPct: clvRecord[b.id]?.clvPct ?? null,
+    closingNoVigOdds: clvRecord[b.id]?.closingNoVigOdds ?? null,
+  }));
+
+  const closedBets = allBets.filter(
+    b => b.status === 'won' || b.status === 'lost' || b.status === 'half_won' || b.status === 'half_lost' || b.status === 'push'
+  );
 
   // Stats globales
   const globalStats = calculateBettingStats(allBets.map(b => ({
     status: b.status, stake: parseFloat(b.stake ?? '0'),
     odds: parseFloat(b.odds ?? '0'), profit: parseFloat(b.profit ?? '0'),
+    clvPct: b.clvPct,
   })));
 
   // Stats por deporte
@@ -35,6 +62,7 @@ export default async function TrendsPage() {
     const stats = calculateBettingStats(bets.map(b => ({
       status: b.status, stake: parseFloat(b.stake ?? '0'),
       odds: parseFloat(b.odds ?? '0'), profit: parseFloat(b.profit ?? '0'),
+      clvPct: b.clvPct,
     })));
     return { sport, ...stats };
   }).sort((a, b) => b.total - a.total);
@@ -51,31 +79,32 @@ export default async function TrendsPage() {
     const stats = calculateBettingStats(bets.map(b => ({
       status: b.status, stake: parseFloat(b.stake ?? '0'),
       odds: parseFloat(b.odds ?? '0'), profit: parseFloat(b.profit ?? '0'),
+      clvPct: b.clvPct,
     })));
     return { market, ...stats };
   }).sort((a, b) => b.total - a.total);
 
-  // Evolución del profit (acumulado)
+  // Evolución del profit (acumulado) vs EV/CLV esperado acumulado
   let cumulativeProfit = 0;
+  let cumulativeClvExpectedProfit = 0;
   const profitHistory = closedBets.map(bet => {
+    const stake = parseFloat(bet.stake ?? '0');
+    const clvEdge = bet.clvPct != null ? bet.clvPct / 100 : (globalStats.avgClv / 100);
     cumulativeProfit += parseFloat(bet.profit ?? '0');
+    cumulativeClvExpectedProfit += stake * clvEdge;
     return {
       date: new Date(bet.created_at).toLocaleDateString('es', { month: 'short', day: 'numeric' }),
       profit: cumulativeProfit,
+      expectedClvProfit: cumulativeClvExpectedProfit,
       result: bet.status,
     };
   });
 
-  const chartPoints = profitHistory.map((p, i) => ({
-    label: `#${i + 1}`,
-    value: Math.max(0, p.profit), // Just for scaling if needed, better to map raw profit if LineChart supports it. LineChart handles negatives.
-    isNegative: p.profit < 0,
-  }));
-  // LineChart uses value directly. Note: Reusing the same chart with cumulative profit.
-  const chartData = profitHistory.map((p, i) => ({
+  const chartData = profitHistory.map(p => ({
     label: p.date,
     value: p.profit,
-    isNegative: p.profit < 0
+    secondaryValue: p.expectedClvProfit,
+    isNegative: p.profit < 0,
   }));
 
   // Calibración del sistema
@@ -92,6 +121,7 @@ export default async function TrendsPage() {
     const stats = calculateBettingStats(bets.map(b => ({
       status: b.status, stake: parseFloat(b.stake ?? '0'),
       odds: parseFloat(b.odds ?? '0'), profit: parseFloat(b.profit ?? '0'),
+      clvPct: b.clvPct,
     })));
     return { confidence, ...stats };
   }).sort((a, b) => {
@@ -103,10 +133,12 @@ export default async function TrendsPage() {
   let currentStreak = 0;
   let streakType: 'won' | 'lost' | 'none' = 'none';
   for (let i = closedBets.length - 1; i >= 0; i--) {
+    const st = closedBets[i].status;
+    if (st !== 'won' && st !== 'lost') continue;
     if (streakType === 'none') {
-      streakType = closedBets[i].status;
+      streakType = st;
       currentStreak = 1;
-    } else if (closedBets[i].status === streakType) {
+    } else if (st === streakType) {
       currentStreak++;
     } else {
       break;
@@ -123,12 +155,50 @@ export default async function TrendsPage() {
       <header style={{ marginBottom: '1.5rem' }}>
         <h1 style={{ fontSize: '1.75rem', fontWeight: '800', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
           <TrendingUp size={26} color="var(--accent-gold)" />
-          Tendencias y Análisis
+          Tendencias y Análisis Cuantitativo
         </h1>
         <p style={{ color: 'var(--foreground-muted)', marginTop: '0.4rem', fontSize: '0.85rem' }}>
-          Rendimiento real basado en tu historial de apuestas en Supabase.
+          Closing Line Value (CLV), Significancia Estadística (P-Value) y Steam Moves en tiempo real.
         </p>
       </header>
+
+      {/* Steam Moves Activos */}
+      {activeSteamMoves.length > 0 && (
+        <div className="card" style={{ marginBottom: '1.5rem', border: '1px solid rgba(59,130,246,0.25)', background: 'linear-gradient(180deg, rgba(59,130,246,0.06) 0%, var(--background-card) 100%)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.85rem', flexWrap: 'wrap', gap: 8 }}>
+            <h3 style={{ fontWeight: 700, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 8, color: '#60a5fa' }}>
+              <Waves size={18} />
+              🌊 Steam Moves Detectados (Dinero Sharp en &lt; 60 min)
+            </h3>
+            <span style={{ fontSize: '0.72rem', color: 'var(--foreground-muted)' }}>
+              Salto implícito &ge; 4.0% en casas sharp
+            </span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '0.65rem' }}>
+            {activeSteamMoves.map((sm, idx) => (
+              <div key={idx} style={{ padding: '0.75rem', borderRadius: 8, background: 'var(--background-secondary)', border: '1px solid rgba(59,130,246,0.2)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                  <span style={{ fontSize: '0.72rem', fontWeight: 800, color: '#60a5fa' }}>
+                    🌊 +{sm.impliedProbDeltaPct.toFixed(1)}% Prob. Implícita
+                  </span>
+                  <span style={{ fontSize: '0.68rem', color: 'var(--foreground-muted)' }}>
+                    {sm.bookmaker}
+                  </span>
+                </div>
+                <div style={{ fontSize: '0.72rem', color: 'var(--foreground-muted)', marginBottom: 2 }}>
+                  {sm.eventLabel}
+                </div>
+                <div style={{ fontWeight: 700, fontSize: '0.85rem', color: 'var(--accent-green)' }}>
+                  {sm.pickFormatted}
+                </div>
+                <div style={{ fontSize: '0.74rem', color: 'var(--foreground-muted)', marginTop: 3 }}>
+                  Cuota Sharp: <strong>@{sm.oldOdds.toFixed(2)}</strong> &rarr; <strong style={{ color: 'var(--accent-gold)' }}>@{sm.newOdds.toFixed(2)}</strong>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {allBets.length === 0 ? (
         <div className="card" style={{ textAlign: 'center', padding: '4rem 2rem' }}>
@@ -145,27 +215,33 @@ export default async function TrendsPage() {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.75rem' }}>
             {[
               { label: 'Profit Total', value: `${globalStats.totalProfit >= 0 ? '+' : ''}$${globalStats.totalProfit.toFixed(2)}`, color: globalStats.totalProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)', icon: DollarSign },
-              { label: 'Win Rate', value: `${globalStats.winRate.toFixed(0)}%`, color: globalStats.winRate >= 50 ? 'var(--accent-green)' : 'var(--accent-red)', icon: Target },
+              { label: 'CLV Promedio', value: `${globalStats.avgClv >= 0 ? '+' : ''}${globalStats.avgClv.toFixed(2)}%`, color: globalStats.avgClv >= 0 ? 'var(--accent-green)' : 'var(--accent-red)', icon: Zap },
               { label: 'ROI / Yield', value: `${globalStats.roi >= 0 ? '+' : ''}${globalStats.roi.toFixed(1)}%`, color: globalStats.roi >= 0 ? 'var(--accent-gold)' : 'var(--accent-red)', icon: TrendingUp },
+              { label: 'P-Value (Z-Test)', value: `p=${globalStats.pValue.toFixed(3)}`, color: globalStats.isStatisticallySignificant ? 'var(--accent-green)' : 'var(--accent-blue)', icon: Compass },
+              { label: 'Win Rate', value: `${globalStats.winRate.toFixed(0)}%`, color: globalStats.winRate >= 50 ? 'var(--accent-green)' : 'var(--accent-red)', icon: Target },
               { label: 'Cuota Promedio', value: avgOdds > 0 ? avgOdds.toFixed(2) : '-', color: 'var(--foreground)', icon: Activity },
               { label: 'Racha Actual', value: currentStreak > 0 ? `${currentStreak} ${streakType === 'won' ? '✅' : '❌'}` : '-', color: streakType === 'won' ? 'var(--accent-green)' : 'var(--accent-red)', icon: Trophy },
-              { label: 'Total Apostado', value: `$${globalStats.totalStaked.toFixed(0)}`, color: 'var(--foreground)', icon: BarChart2 },
             ].map(({ label, value, color, icon: Icon }, i) => (
               <div key={i} className="stat-card">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                   <span style={{ fontSize: '0.72rem', color: 'var(--foreground-muted)' }}>{label}</span>
                   <Icon size={14} color={color} />
                 </div>
-                <div style={{ fontSize: '1.5rem', fontWeight: 800, color }}>{value}</div>
+                <div style={{ fontSize: '1.4rem', fontWeight: 800, color }}>{value}</div>
               </div>
             ))}
           </div>
 
-          {/* Gráfico de profit acumulado */}
+          {/* Gráfico de profit acumulado vs CLV esperado */}
           {profitHistory.length > 0 && (
             <div className="card">
-              <h3 style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '1rem' }}>📈 Evolución del Profit</h3>
-              <LineChart data={chartData} height={180} />
+              <h3 style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '0.75rem' }}>📈 Evolución: Profit Real vs Valor Esperado CLV ($)</h3>
+              <LineChart
+                data={chartData}
+                height={190}
+                primaryLabel="Profit Real ($)"
+                comparisonLabel="EV Acumulado según CLV ($)"
+              />
             </div>
           )}
 

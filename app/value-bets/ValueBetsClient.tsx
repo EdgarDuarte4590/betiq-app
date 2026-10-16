@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
-import { Zap, AlertCircle, Search, Filter, ShieldCheck, TrendingUp } from 'lucide-react';
-import type { ValueBetOpportunity } from '@/lib/algorithms/value-bet-calculator';
+import { useState, useEffect, useCallback } from 'react';
+import { Zap, Search, Filter, ShieldCheck, TrendingUp } from 'lucide-react';
+import { calculateSimultaneousKelly, type ValueBetOpportunity } from '@/lib/algorithms/value-bet-calculator';
 import { getSportMeta } from '@/lib/apis/odds-api';
 import { useBankrollStore } from '@/lib/store/bankrollStore';
 
@@ -11,13 +11,51 @@ interface Props {
 }
 
 export default function ValueBetsClient({ initialBets }: Props) {
-  const { openModal, bankroll } = useBankrollStore();
+  const { openModal, bankroll, pendingExposure } = useBankrollStore();
 
-  const [minOdds, setMinOdds] = useState('1.5');
-  const [maxOdds, setMaxOdds] = useState('5.0');
-  const [minValue, setMinValue] = useState('2.0');
+  const [minOdds, setMinOdds] = useState('1.45');
+  const [maxOdds, setMaxOdds] = useState('5.5');
+  const [minValue, setMinValue] = useState('1.5');
   const [sportFilter, setSportFilter] = useState('Todos');
   const [onlySharp, setOnlySharp] = useState(false);
+
+  const handleRowClick = useCallback((vb: ValueBetOpportunity) => {
+    const { icon } = getSportMeta(vb.sport);
+    const realBankroll = bankroll > 0 ? bankroll : 1000;
+    const simKelly = calculateSimultaneousKelly(vb.kellyStake, realBankroll, pendingExposure);
+    const suggestedStake = simKelly.recommendedStakeCurrency > 0
+      ? simKelly.recommendedStakeCurrency.toFixed(2)
+      : Math.max(5, realBankroll * 0.01).toFixed(2);
+
+    openModal({
+      match: vb.event,
+      odds: vb.oddsBest.toFixed(2),
+      stake: suggestedStake,
+      sport: icon,
+      league: vb.league,
+      pick: vb.pick,
+      market: vb.market,
+      matchTime: vb.commenceTime,
+      sportKey: vb.sport,
+      kellyPct: simKelly.adjustedKellyPct,
+      fairOdds: vb.fairOdds,
+      units: simKelly.recommendedUnits,
+      isSteamMove: vb.isSteamMove,
+    });
+  }, [bankroll, pendingExposure, openModal]);
+
+  // Deep Link desde botón inline de Telegram: /value-bets?QuickBet=<eventId>
+  useEffect(() => {
+    if (typeof window === 'undefined' || initialBets.length === 0) return;
+    const params = new URLSearchParams(window.location.search);
+    const quickBetId = params.get('QuickBet');
+    if (quickBetId) {
+      const target = initialBets.find(b => b.eventId === quickBetId);
+      if (target) {
+        handleRowClick(target);
+      }
+    }
+  }, [initialBets, handleRowClick]);
 
   // Filter logic
   const filteredBets = initialBets.filter((vb) => {
@@ -31,24 +69,6 @@ export default function ValueBetsClient({ initialBets }: Props) {
     return true;
   });
 
-  const handleRowClick = (vb: ValueBetOpportunity) => {
-    const { icon } = getSportMeta(vb.sport);
-    const realBankroll = bankroll > 0 ? bankroll : 1000;
-    const suggestedStake = vb.kellyStake > 0
-      ? ((realBankroll * vb.kellyStake) / 100).toFixed(2)
-      : '50';
-
-    openModal({
-      match: vb.event,
-      odds: vb.oddsBest.toFixed(2),
-      stake: suggestedStake,
-      sport: icon,
-      league: vb.league,
-      pick: vb.pick,
-      market: vb.market,
-    });
-  };
-
   // Summary stats
   const avgValue = filteredBets.length > 0
     ? filteredBets.reduce((s, b) => s + b.valuePercentage, 0) / filteredBets.length
@@ -60,10 +80,10 @@ export default function ValueBetsClient({ initialBets }: Props) {
       <header style={{ marginBottom: '1.5rem' }}>
         <h1 style={{ fontSize: '1.6rem', fontWeight: '800', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
           <Zap size={24} color="var(--accent-green)" />
-          Value Bets Scanner
+          Value Bets Scanner (Power Devigging)
         </h1>
         <p style={{ color: 'var(--foreground-muted)', marginTop: '0.4rem', fontSize: '0.85rem' }}>
-          Detecta discrepancias matemáticas antes de que el mercado se corrija.
+          Discrepancias cuantitativas frente al Consenso Sharp Ponderado (Pinnacle 50% · Betfair/Matchbook 30% · Bookmaker 20%).
         </p>
       </header>
 
@@ -72,8 +92,8 @@ export default function ValueBetsClient({ initialBets }: Props) {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.75rem', marginBottom: '1.25rem' }}>
           {[
             { label: 'Total oportunidades', value: String(initialBets.length), color: 'var(--accent-green)', icon: Zap },
-            { label: 'Valor promedio', value: `+${avgValue.toFixed(1)}%`, color: 'var(--accent-gold)', icon: TrendingUp },
-            { label: 'Respaldadas por Pinnacle', value: `${sharpCount} de ${filteredBets.length}`, color: 'var(--accent-blue)', icon: ShieldCheck },
+            { label: 'EV% promedio', value: `+${avgValue.toFixed(1)}%`, color: 'var(--accent-gold)', icon: TrendingUp },
+            { label: 'Respaldadas por Sharp', value: `${sharpCount} de ${filteredBets.length}`, color: 'var(--accent-blue)', icon: ShieldCheck },
           ].map(({ label, value, color, icon: Icon }, i) => (
             <div key={i} className="stat-card" style={{ padding: '0.875rem 1rem' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
@@ -122,9 +142,9 @@ export default function ValueBetsClient({ initialBets }: Props) {
             />
           </div>
           <div>
-            <label style={{ display: 'block', fontSize: '0.72rem', color: 'var(--accent-green)', marginBottom: 4, fontWeight: 600 }}>Valor Mínimo (%)</label>
+            <label style={{ display: 'block', fontSize: '0.72rem', color: 'var(--accent-green)', marginBottom: 4, fontWeight: 600 }}>EV Mínimo (%)</label>
             <input
-              type="number" step="1" min="1" max="50"
+              type="number" step="0.5" min="0.5" max="50"
               value={minValue} onChange={(e) => setMinValue(e.target.value)}
               style={{ width: '100%', padding: '0.55rem 0.75rem', borderRadius: 8, border: '1px solid var(--accent-green)', background: 'rgba(0,214,143,0.05)', color: 'var(--accent-green)', fontWeight: 700, fontSize: '0.85rem' }}
             />
@@ -138,7 +158,7 @@ export default function ValueBetsClient({ initialBets }: Props) {
                 style={{ width: 14, height: 14, accentColor: 'var(--accent-blue)' }}
               />
               <span style={{ fontSize: '0.78rem', color: onlySharp ? 'var(--accent-blue)' : 'var(--foreground-muted)', fontWeight: onlySharp ? 600 : 400 }}>
-                📌 Solo respaldadas por Pinnacle
+                📌 Solo Consenso Sharp
               </span>
             </label>
           </div>
@@ -156,7 +176,6 @@ export default function ValueBetsClient({ initialBets }: Props) {
         </div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          {/* Table header */}
           <div style={{
             padding: '0.75rem 1.25rem',
             background: 'var(--background-secondary)',
@@ -167,11 +186,10 @@ export default function ValueBetsClient({ initialBets }: Props) {
               Mostrando <strong style={{ color: 'var(--accent-green)' }}>{filteredBets.length}</strong> oportunidades
             </span>
             <span style={{ fontSize: '0.68rem', color: 'var(--foreground-subtle)' }}>
-              Clic en cualquier fila para registrar
+              Clic en cualquier fila para registrar con Stake Kelly Simultáneo
             </span>
           </div>
 
-          {/* Column headers */}
           <div style={{
             padding: '0.5rem 1.25rem',
             display: 'grid',
@@ -179,7 +197,7 @@ export default function ValueBetsClient({ initialBets }: Props) {
             gap: '0.5rem',
             borderBottom: '1px solid var(--border-subtle)',
           }}>
-            {['Liga / Hora', 'Partido & Pick', 'Cuota', 'Valor', 'Kelly', 'Libros'].map((h, i) => (
+            {['Liga / Hora', 'Partido & Pick', 'Cuota vs Fair', 'EV%', 'Kelly (U)', 'Libros'].map((h, i) => (
               <div key={i} style={{ fontSize: '0.6rem', color: 'var(--foreground-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: i > 1 ? 'center' : 'left' }}>
                 {h}
               </div>
@@ -221,21 +239,28 @@ export default function ValueBetsClient({ initialBets }: Props) {
                   {/* Partido + Pick */}
                   <div>
                     <div style={{ fontWeight: 600, fontSize: '0.85rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{vb.event}</div>
-                    <div style={{ fontSize: '0.75rem', marginTop: 2, display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <div style={{ fontSize: '0.75rem', marginTop: 2, display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
                       <span style={{ color: 'var(--accent-green)', fontWeight: 600 }}>{vb.pick}</span>
                       <span style={{ color: 'var(--foreground-subtle)', fontSize: '0.65rem' }}>· {vb.market}</span>
                       {vb.pinnacleAligns && (
-                        <span title="Pinnacle respalda este pick" style={{ fontSize: '0.58rem', padding: '0 4px', borderRadius: 3, background: 'rgba(59,130,246,0.15)', color: 'var(--accent-blue)', fontWeight: 700 }}>📌</span>
+                        <span title="Consenso Sharp respalda este pick" style={{ fontSize: '0.58rem', padding: '0 4px', borderRadius: 3, background: 'rgba(59,130,246,0.15)', color: 'var(--accent-blue)', fontWeight: 700 }}>📌 SHARP</span>
+                      )}
+                      {vb.isSteamMove && (
+                        <span title="Steam Move detectado (>4% prob implícita en sharp books)" style={{ fontSize: '0.58rem', padding: '1px 5px', borderRadius: 4, background: 'rgba(56,189,248,0.16)', color: '#38bdf8', fontWeight: 800 }}>
+                          🌊 STEAM MOVE
+                        </span>
                       )}
                     </div>
                   </div>
 
-                  {/* Cuota */}
+                  {/* Cuota vs Fair Odds */}
                   <div style={{ textAlign: 'center' }}>
                     <div style={{ fontWeight: 800, fontSize: '0.95rem', color: 'var(--accent-gold)' }}>
-                      {vb.oddsMin === vb.oddsMax ? vb.oddsBest.toFixed(2) : `${vb.oddsMin.toFixed(2)}–${vb.oddsMax.toFixed(2)}`}
+                      {vb.oddsBest.toFixed(2)}
                     </div>
-                    <div style={{ fontSize: '0.58rem', color: 'var(--foreground-subtle)', marginTop: 1 }}>{vb.bestBookmaker}</div>
+                    <div style={{ fontSize: '0.58rem', color: 'var(--foreground-subtle)', marginTop: 1 }}>
+                      Fair: {vb.fairOdds ? vb.fairOdds.toFixed(2) : (1 / vb.marketProbability).toFixed(2)} · {vb.bestBookmaker}
+                    </div>
                   </div>
 
                   {/* Value */}
@@ -250,8 +275,11 @@ export default function ValueBetsClient({ initialBets }: Props) {
                   </div>
 
                   {/* Kelly */}
-                  <div style={{ textAlign: 'center', fontSize: '0.8rem', fontWeight: 600, color: 'var(--foreground-muted)' }}>
-                    {vb.kellyStake.toFixed(1)}%
+                  <div style={{ textAlign: 'center', fontSize: '0.8rem', fontWeight: 700, color: 'var(--accent-green)' }}>
+                    {vb.kellyStake.toFixed(2)} U
+                    <div style={{ fontSize: '0.58rem', color: 'var(--foreground-subtle)', fontWeight: 400 }}>
+                      ({vb.kellyStake.toFixed(1)}%)
+                    </div>
                   </div>
 
                   {/* Bookmakers */}
@@ -265,17 +293,6 @@ export default function ValueBetsClient({ initialBets }: Props) {
               );
             })}
           </div>
-        </div>
-      )}
-
-      {/* Legend */}
-      {filteredBets.length > 0 && (
-        <div style={{ marginTop: '1rem', padding: '0.75rem 1rem', background: 'rgba(0,0,0,0.2)', borderRadius: 8, display: 'flex', flexWrap: 'wrap', gap: '1rem', fontSize: '0.68rem', color: 'var(--foreground-subtle)' }}>
-          <span><strong style={{ color: 'var(--accent-green)' }}>Verde</strong> = +10% valor</span>
-          <span><strong style={{ color: 'var(--accent-gold)' }}>Amarillo</strong> = +5–10%</span>
-          <span><strong style={{ color: '#94a3b8' }}>Gris</strong> = +2–5%</span>
-          <span><strong style={{ color: 'var(--accent-blue)' }}>📌</strong> = Pinnacle lo respalda</span>
-          <span><strong>Consenso</strong> = % de libros que acuerdan la dirección del pick</span>
         </div>
       )}
     </div>

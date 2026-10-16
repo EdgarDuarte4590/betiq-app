@@ -1,9 +1,9 @@
 import { createClient } from '@/lib/supabase/server';
-import { redirect } from 'next/navigation';
-import { Ticket, TrendingUp, DollarSign, Target } from 'lucide-react';
+import { Ticket } from 'lucide-react';
 import BetCard from '@/components/picks/BetCard';
 import SyncButton from '@/components/picks/SyncButton';
 import { calculateBettingStats } from '@/lib/algorithms/value-bet-calculator';
+import { computeClvForBets } from '@/app/actions/snapshots';
 
 export default async function PicksPage() {
   const supabase = await createClient();
@@ -17,17 +17,38 @@ export default async function PicksPage() {
     .eq('user_id', user.id)
     .order('created_at', { ascending: false }) : { data: [] };
 
-  const allBets = (bets as any[]) ?? [];
+  const rawBets = (bets as any[]) ?? [];
+  const clvRecord = await computeClvForBets(
+    rawBets.map(b => ({
+      id: b.id,
+      event: b.event ?? '',
+      pick: b.pick ?? '',
+      market: b.market ?? 'H2H',
+      odds: parseFloat(b.odds ?? '0'),
+      match_time: b.match_time ?? b.created_at,
+    }))
+  );
+
+  const allBets = rawBets.map(b => {
+    const clvInfo = clvRecord[b.id];
+    return {
+      ...b,
+      clvPct: clvInfo?.clvPct ?? null,
+      closingNoVigOdds: clvInfo?.closingNoVigOdds ?? null,
+    };
+  });
+
   const stats = calculateBettingStats(allBets.map(b => ({
     status: b.status,
     stake: parseFloat(b.stake),
     odds: parseFloat(b.odds),
     profit: parseFloat(b.profit ?? '0'),
+    clvPct: b.clvPct,
   })));
 
   const pendingBets = allBets.filter(b => b.status === 'pending');
-  const wonBets = allBets.filter(b => b.status === 'won');
-  const lostBets = allBets.filter(b => b.status === 'lost');
+  const wonBets = allBets.filter(b => b.status === 'won' || b.status === 'half_won' || b.status === 'push' || b.status === 'void');
+  const lostBets = allBets.filter(b => b.status === 'lost' || b.status === 'half_lost');
 
   return (
     <div>
@@ -39,7 +60,7 @@ export default async function PicksPage() {
               Mis Picks
             </h1>
             <p style={{ color: 'var(--foreground-muted)', marginTop: '0.4rem', fontSize: '0.85rem' }}>
-              Historial completo · Cierra tus tiquetes o sincroniza con resultados reales.
+              Historial completo · Cierra tus tiquetes o sincroniza con resultados reales y Closing Line Value (CLV).
             </p>
           </div>
           {pendingBets.length > 0 && <SyncButton />}
@@ -48,28 +69,36 @@ export default async function PicksPage() {
 
       {/* Stats Row */}
       {allBets.length > 0 && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem', marginBottom: '2rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(165px, 1fr))', gap: '1rem', marginBottom: '2rem' }}>
           <div className="stat-card">
             <div style={{ fontSize: '0.75rem', color: 'var(--foreground-muted)', marginBottom: 8 }}>ROI Total</div>
-            <div style={{ fontSize: '1.75rem', fontWeight: 800, color: stats.roi >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+            <div style={{ fontSize: '1.65rem', fontWeight: 800, color: stats.roi >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>
               {stats.roi >= 0 ? '+' : ''}{stats.roi.toFixed(1)}%
             </div>
           </div>
           <div className="stat-card">
+            <div style={{ fontSize: '0.75rem', color: 'var(--foreground-muted)', marginBottom: 8 }}>CLV Promedio</div>
+            <div style={{ fontSize: '1.65rem', fontWeight: 800, color: stats.avgClv >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+              {stats.avgClv >= 0 ? '+' : ''}{stats.avgClv.toFixed(2)}%
+            </div>
+          </div>
+          <div className="stat-card">
             <div style={{ fontSize: '0.75rem', color: 'var(--foreground-muted)', marginBottom: 8 }}>Win Rate</div>
-            <div style={{ fontSize: '1.75rem', fontWeight: 800 }}>
+            <div style={{ fontSize: '1.65rem', fontWeight: 800 }}>
               {stats.winRate.toFixed(0)}%
             </div>
           </div>
           <div className="stat-card">
             <div style={{ fontSize: '0.75rem', color: 'var(--foreground-muted)', marginBottom: 8 }}>Profit Neto</div>
-            <div style={{ fontSize: '1.75rem', fontWeight: 800, color: stats.totalProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+            <div style={{ fontSize: '1.65rem', fontWeight: 800, color: stats.totalProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>
               {stats.totalProfit >= 0 ? '+' : ''}${stats.totalProfit.toFixed(2)}
             </div>
           </div>
           <div className="stat-card">
-            <div style={{ fontSize: '0.75rem', color: 'var(--foreground-muted)', marginBottom: 8 }}>Apostado Total</div>
-            <div style={{ fontSize: '1.75rem', fontWeight: 800 }}>${stats.totalStaked.toFixed(0)}</div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--foreground-muted)', marginBottom: 8 }}>Significancia (p)</div>
+            <div style={{ fontSize: '1.65rem', fontWeight: 800, color: stats.isStatisticallySignificant ? 'var(--accent-green)' : 'var(--accent-gold)' }}>
+              {stats.pValue.toFixed(3)}
+            </div>
           </div>
         </div>
       )}
