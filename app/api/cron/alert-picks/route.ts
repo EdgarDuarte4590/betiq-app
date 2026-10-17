@@ -10,6 +10,7 @@ import {
 import {
   sendPreGameAlertTelegram,
   sendSystemHealthAlertTelegram,
+  sendScannerHeartbeatTelegram,
 } from '@/lib/notifications/telegram';
 import {
   saveSentPicks,
@@ -179,33 +180,6 @@ export async function GET(request: Request) {
 
     const step5_after_deduplication = newPicks.length;
 
-    // 6. Despacho a Telegram
-    const toSend = newPicks.slice(0, MAX_ALERTS_PER_RUN);
-    let step6_telegram_dispatched = 0;
-    const sentPicks = [];
-
-    if (!isDryRun && toSend.length > 0) {
-      for (const pick of toSend) {
-        if (step6_telegram_dispatched > 0) {
-          await new Promise(r => setTimeout(r, 400));
-        }
-
-        const result = await sendPreGameAlertTelegram(pick);
-        if (result.ok) {
-          step6_telegram_dispatched++;
-          sentPicks.push(pick);
-        } else {
-          const errStr = result.error ?? 'Unknown Telegram error';
-          telegramErrors.push(`${pick.event}: ${errStr}`);
-          console.error(`[alert-picks] Error enviando alerta para ${pick.event}:`, errStr);
-        }
-      }
-
-      if (sentPicks.length > 0) {
-        await saveSentPicks(sentPicks, 'pre_game_alert');
-      }
-    }
-
     const discard_reasons_summary = {
       missing_sharp_book: diagnosis.discardReasons.missing_sharp_book,
       ev_too_low: diagnosis.discardReasons.ev_too_low + diagnosis.discardReasons.odds_out_of_zone,
@@ -213,11 +187,57 @@ export async function GET(request: Request) {
       insufficient_bookmakers: diagnosis.discardReasons.insufficient_bookmakers,
     };
 
+    // 6. Despacho a Telegram
+    const toSend = newPicks.slice(0, MAX_ALERTS_PER_RUN);
+    let step6_telegram_dispatched = 0;
+    let heartbeat_sent = false;
+    const sentPicks = [];
+
+    if (!isDryRun) {
+      if (toSend.length > 0) {
+        for (const pick of toSend) {
+          if (step6_telegram_dispatched > 0) {
+            await new Promise(r => setTimeout(r, 400));
+          }
+
+          const result = await sendPreGameAlertTelegram(pick);
+          if (result.ok) {
+            step6_telegram_dispatched++;
+            sentPicks.push(pick);
+          } else {
+            const errStr = result.error ?? 'Unknown Telegram error';
+            telegramErrors.push(`${pick.event}: ${errStr}`);
+            console.error(`[alert-picks] Error enviando alerta para ${pick.event}:`, errStr);
+          }
+        }
+
+        if (sentPicks.length > 0) {
+          await saveSentPicks(sentPicks, 'pre_game_alert');
+        }
+      } else {
+        // Enviar reporte silencioso (sin sonido/vibración) cuando no hay picks nuevos de valor
+        const hbRes = await sendScannerHeartbeatTelegram({
+          step1Events: step1_events_fetched,
+          step2WindowEvents: step2_future_events_valid,
+          step3Candidates: step3_value_bets_calculated,
+          step4PassedQuality: step4_passed_threshold_filters,
+          alreadySentCount,
+          evTooLowCount: discard_reasons_summary.ev_too_low,
+          snapshotAgeMins: snapshotResult.snapshotAge,
+        });
+        heartbeat_sent = hbRes.ok;
+        if (!hbRes.ok && hbRes.error) {
+          telegramErrors.push(`Heartbeat: ${hbRes.error}`);
+        }
+      }
+    }
+
     const funnel_diagnostics = {
       timestamp,
       used_live_api_fallback: usedLiveApiFallback,
       snapshot_age_minutes: snapshotResult.snapshotAge,
       dry_run: isDryRun,
+      heartbeat_sent,
       step1_events_fetched,
       step2_future_events_valid,
       step3_value_bets_calculated,

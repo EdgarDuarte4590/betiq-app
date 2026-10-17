@@ -354,7 +354,8 @@ async function sendTelegramMessage(
   text: string,
   parseMode: 'HTML' | null = 'HTML',
   plainFallback?: string,
-  replyMarkup?: Record<string, unknown>
+  replyMarkup?: Record<string, unknown>,
+  disableNotification: boolean = false
 ): Promise<TelegramResult> {
   const token  = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -372,6 +373,7 @@ async function sendTelegramMessage(
     };
     if (parseMode) body.parse_mode = parseMode;
     if (replyMarkup) body.reply_markup = replyMarkup;
+    if (disableNotification) body.disable_notification = true;
 
     const res = await fetch(`${TELEGRAM_API}/bot${token}/sendMessage`, {
       method:  'POST',
@@ -395,7 +397,7 @@ async function sendTelegramMessage(
       if (parseMode !== null || replyMarkup) {
         const fallbackText = plainFallback ?? text.replace(/<[^>]+>/g, '');
         console.warn('[Telegram] ⚠️ Reintentando envío en texto plano (fallback)...');
-        return sendTelegramMessage(fallbackText, null, undefined, undefined);
+        return sendTelegramMessage(fallbackText, null, undefined, undefined, disableNotification);
       }
 
       return { ok: false, error: errMsg };
@@ -497,6 +499,44 @@ export async function sendSystemHealthAlertTelegram(detail: string): Promise<Tel
 }
 
 /**
+ * Envía un latido silencioso (sin sonido/vibración en Telegram) cuando `alert-picks`
+ * corre en modo de prueba y no encuentra nuevas alertas de valor, para confirmar que el
+ * cron está vivo sin confundirse con una alerta real de pick.
+ */
+export async function sendScannerHeartbeatTelegram(params: {
+  step1Events: number;
+  step2WindowEvents: number;
+  step3Candidates: number;
+  step4PassedQuality: number;
+  alreadySentCount: number;
+  evTooLowCount: number;
+  snapshotAgeMins: number | null;
+}): Promise<TelegramResult> {
+  const timeStr = new Date().toLocaleTimeString('es-MX', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'America/Mexico_City',
+  });
+
+  const htmlText =
+    `🔕 <b>[Reporte Silencioso · Sin Alertas Nuevas]</b> (${escapeHtml(timeStr)} CST)\n\n` +
+    `✅ El cron <code>alert-picks</code> se ejecutó correctamente, pero ningún partido nuevo superó el umbral de valor ahora mismo:\n` +
+    `• Partidos en snapshot: <b>${params.step1Events}</b> (${params.snapshotAgeMins ?? 0}m antigüedad)\n` +
+    `• Próximas 12h–24h: <b>${params.step2WindowEvents}</b>\n` +
+    `• Evaluados EV+: <b>${params.step3Candidates}</b>\n` +
+    `• Superaron filtro alta calidad: <b>${params.step4PassedQuality}</b> (Ya enviados hoy: ${params.alreadySentCount})\n` +
+    `• Descartados por EV insuficiente: <b>${params.evTooLowCount}</b>`;
+
+  const plainText =
+    `🔕 [Reporte Silencioso · Sin Alertas Nuevas] (${timeStr} CST)\n` +
+    `✅ El cron alert-picks corrió bien, pero no hay picks nuevos de valor ahora mismo.\n` +
+    `• Snapshot: ${params.step1Events} (${params.snapshotAgeMins ?? 0}m) | Ventana: ${params.step2WindowEvents} | EV+: ${params.step3Candidates} | Ya enviados: ${params.alreadySentCount}`;
+
+  // Se envía con disableNotification = true para que NO suene ni vibre como alerta de apuesta
+  return sendTelegramMessage(htmlText, 'HTML', plainText, undefined, true);
+}
+
+/**
  * Prueba de conectividad: envía un mensaje simple para verificar que el bot funciona.
  */
 export async function sendTestTelegram(): Promise<TelegramResult> {
@@ -513,3 +553,4 @@ export async function sendTestTelegram(): Promise<TelegramResult> {
     '✅ BetIQ v4.0 — Bot conectado correctamente!\n\nLas notificaciones cuantitativas están activas.'
   );
 }
+
